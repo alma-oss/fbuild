@@ -21,8 +21,6 @@ module Targets =
 
     [<RequireQualifiedAccess>]
     module SafeStackTargets =
-        open SafeBuildHelpers
-
         let init safe =
             Target.create "SafeClean" (fun _ ->
                 Shell.cleanDir safe.DeployPath
@@ -37,8 +35,8 @@ module Targets =
 
             Target.create "Bundle" (fun _ ->
                 [
-                    "server", toProcess (Dotnet Publish) [ "-c"; "Release"; "-o"; safe.DeployPath ] safe.ServerPath
-                    "client", toProcess (Dotnet Fable) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite"; "build" ] safe.ClientPath
+                    toJob (JobName "server") (Dotnet Publish) [ "-c"; "Release"; "-o"; safe.DeployPath ] safe.ServerPath
+                    toJob (JobName "client") (Dotnet Fable) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite"; "build" ] safe.ClientPath
                 ]
                 |> runParallel
             )
@@ -46,8 +44,8 @@ module Targets =
             Target.create "Run" (fun _ ->
                 run (Dotnet Build) [] safe.SharedPath
                 [
-                    "server", toProcess (Dotnet WatchRun) [] safe.ServerPath
-                    "client", toProcess (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientPath
+                    toJob (JobName "server") (Dotnet WatchRun) [] safe.ServerPath
+                    toJob (JobName "client") (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientPath
                 ]
                 |> runParallel
             )
@@ -56,8 +54,8 @@ module Targets =
                 run (Dotnet Build) [] safe.SharedPath
                 Environment.setEnvironVar "RUN_IN" "mirrord"
                 [
-                    "server", toProcess Mirrord [ "exec"; "--config-file"; "../../.mirrord/mirrord.json"; "--"; "dotnet"; "watch"; "run" ] safe.ServerPath
-                    "client", toProcess (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientPath
+                    toJob (JobName "server") Mirrord [ "exec"; "--config-file"; "../../.mirrord/mirrord.json"; "--"; "dotnet"; "watch"; "run" ] safe.ServerPath
+                    toJob (JobName "client") (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientPath
                 ]
                 |> runParallel
             )
@@ -66,8 +64,8 @@ module Targets =
                 run (Dotnet Build) [] safe.SharedTestsPath
 
                 [
-                    "server", toProcess (Dotnet WatchRun) [] safe.ServerTestsPath
-                    "client", toProcess (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientTestsPath
+                    toJob (JobName "server") (Dotnet WatchRun) [] safe.ServerTestsPath
+                    toJob (JobName "client") (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientTestsPath
                 ]
                 |> runParallel
             )
@@ -76,8 +74,8 @@ module Targets =
                 run (Dotnet Build) [] safe.SharedTestsPath
 
                 [
-                    "server", toProcess (Dotnet Tests) [] safe.ServerTestsPath
-                    //"client", toProcess (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientTestsPath
+                    toJob (JobName "server") (Dotnet Tests) [] safe.ServerTestsPath
+                    //toJob (JobName "client") (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientTestsPath
                 ]
                 |> runParallel
             )
@@ -148,7 +146,7 @@ module Targets =
                 let release =
                     definition.ChangeLog
                     |> Option.bind (fun changeLog ->
-                        try ReleaseNotes.parse (System.IO.File.ReadAllLines changeLog |> Seq.filter ((<>) "## Unreleased")) |> Some
+                        try ReleaseNotes.parse (File.ReadAllLines changeLog |> Seq.filter ((<>) "## Unreleased")) |> Some
                         with _ -> None
                     )
 
@@ -200,39 +198,58 @@ module Targets =
                     (getAssemblyInfoAttributes projectName)
                 )
 
+            // AssemblyInfo.fs is a compile input, so a rewrite makes MSBuild recompile the whole
+            // project. `createdAt` alone would move on every run, which is why it is excluded from
+            // the comparison — the timestamp records when the assembly info last changed, not when
+            // the last build ran.
+            let createUnlessUnchanged path attributes =
+                let candidate = IO.Path.GetTempFileName ()
+
+                try
+                    AssemblyInfoFile.createFSharp candidate attributes
+
+                    let significantLines file =
+                        File.read file
+                        |> Seq.filter (fun (line: string) -> line.Contains "createdAt" |> not)
+                        |> List.ofSeq
+
+                    if not (File.exists path) || significantLines candidate <> significantLines path then
+                        Shell.copyFile path candidate
+                finally
+                    File.delete candidate
+
             definition.Sources.All
             |> Seq.map getProjectDetails
             |> Seq.iter (fun (_, _, folderName, attributes) ->
-                AssemblyInfoFile.createFSharp (folderName </> "AssemblyInfo.fs") attributes
+                createUnlessUnchanged (folderName </> "AssemblyInfo.fs") attributes
             )
         )
 
         Target.create "Build" (fun _ ->
-            definition.Sources.All
-            |> Seq.iter (Path.getDirectory >> run (Dotnet Build) [])
+            match !! "*.slnx" ++ "*.sln" |> Solution.pick with
+            | Some solution -> run (Dotnet Build) [ solution ] "."
+            | None -> definition.Sources.All |> Seq.iter (Path.getDirectory >> run (Dotnet Build) [])
         )
 
         Target.create "Lint" <| skipOn "no-lint" (fun _ ->
             definition.Sources.All
             ++ "build/build.fsproj"
-            |> Seq.iter (fun fsproj ->
-                run (Dotnet Lint) [ fsproj ] "."
-                Trace.tracefn "Lint %s is Ok" fsproj
-            )
+            |> Seq.map (fun fsproj -> toJob (JobName fsproj) (Dotnet Lint) [ fsproj ] ".")
+            |> runParallelWith GroupedByJob
         )
 
         if not definition.Specs.IsSAFEStack then
             Target.create "Tests" (fun _ ->
                 if definition.Sources.Tests |> Seq.isEmpty
                 then Trace.tracefn "There are no tests yet."
-                else run (Dotnet Tests) [] "tests"
+                else run (Dotnet Tests) [ "--no-build" ] "tests"
             )
 
             let zipRelease releaseDir runtimeIds =
                 if releaseDir </> "zipCompiled" |> File.exists
                 then
                     Trace.tracefn "\nZipping released files in %s ..." releaseDir
-                    run (Raw (releaseDir </> "zipCompiled")) [] "."
+                    run (Command.Raw (releaseDir </> "zipCompiled")) [] "."
 
                 Trace.tracefn "\nZip compiled files"
                 runtimeIds
@@ -278,22 +295,30 @@ module Targets =
                     |> Seq.map (tee (Trace.tracefn " - %s"))
                     |> Seq.iter File.delete
 
+                    // Every runtime ID restores into the same `obj/project.assets.json`, so the
+                    // restores cannot overlap each other or the publishes that read the file.
+                    Trace.tracefn "\nRestore each runtime"
+                    runtimeIds
+                    |> List.iter (RuntimeId.value >> fun runtimeId ->
+                        Trace.tracefn " - %s" runtimeId
+                        runInRoot (Dotnet Restore) [ "-r"; runtimeId; releaseSource ]
+                    )
+
                     Trace.tracefn "\nPublish current release"
 
-                    seq {
-                        let project = releaseSource
-                        yield! runtimeIds |> List.collect (RuntimeId.value >> fun runtimeId -> [project, runtimeId])
-                    }
-                    |> Seq.iter (fun (project, runtimeId) ->
-                        runInRoot (Dotnet Publish) [
+                    runtimeIds
+                    |> Seq.map (RuntimeId.value >> fun runtimeId ->
+                        toJob (JobName runtimeId) (Dotnet Publish) [
                             "-c"; "Release"
                             "/p:PublishSingleFile=true"
                             "-o"; sprintf "%s/%s" releaseDir runtimeId
                             "--self-contained"
+                            "--no-restore"
                             "-r"; runtimeId
-                            project
-                        ]
+                            releaseSource
+                        ] "."
                     )
+                    |> runParallelWith GroupedByJob
 
                     runtimeIds |> zipRelease releaseDir
 

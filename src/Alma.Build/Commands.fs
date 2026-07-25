@@ -1,6 +1,8 @@
 namespace Alma.Build
 
-/// Typed build commands and the RTK-aware runners that execute them.
+/// Typed build commands and the RTK-aware runners that execute them: FAKE trace compaction,
+/// the command vocabulary, RTK transport selection, serial and parallel runners, and the
+/// temp-log tee that keeps a failing run's suppressed output reachable.
 module internal Commands =
     open System
     open System.IO
@@ -14,7 +16,7 @@ module internal Commands =
     /// Strips FAKE's planning/progress output when RTK is active; errors pass through.
     [<RequireQualifiedAccess>]
     module CompactTrace =
-        let private isNoise (message: string) =
+        let internal isNoise (message: string) =
             let m = message.TrimStart ()
 
             m.StartsWith "Shortened DependencyGraph"
@@ -25,12 +27,12 @@ module internal Commands =
             // FAKE's internal command echoes (mono/git probes)
             || m.Contains "(In: "
 
-        let private isSeparator (message: string) =
+        let internal isSeparator (message: string) =
             let m = message.Trim ()
-            m.Length > 0 && m |> Seq.forall ((=) '-')
+            m.Length > 0 && (m |> Seq.forall ((=) '-') || m |> Seq.forall ((=) '='))
 
         // Bare git SHA echoed by `git rev-parse` at startup
-        let private isCommitHash (message: string) =
+        let internal isCommitHash (message: string) =
             let m = message.Trim ()
             m.Length = 40 && m |> Seq.forall Uri.IsHexDigit
 
@@ -47,7 +49,7 @@ module internal Commands =
                             | TraceData.LogMessage (m, _)
                             | TraceData.TraceMessage (m, _)
                             | TraceData.ImportantMessage m ->
-                                if m.Trim () = "Build Time Report" then
+                                if m.Contains "Build Time Report" then
                                     inReport <- true
 
                                 if isNoise m || isSeparator m || isCommitHash m || inReport then
@@ -66,6 +68,7 @@ module internal Commands =
 
     type DotnetCommand =
         | Build
+        | Restore
         | Lint
         | Tests
         | Pack
@@ -89,7 +92,7 @@ module internal Commands =
         | Nuget of NugetCommand
         | Npm of NpmCommand
         | Mirrord
-        | Raw of exe: string
+        | Raw of cmd: string
 
     [<RequireQualifiedAccess>]
     module Command =
@@ -102,30 +105,32 @@ module internal Commands =
                 |> failwith
 
         let render: Command -> string * string list = function
-        | Dotnet dotnet ->
-            "dotnet",
-            match dotnet with
-            | Build -> [ "build" ]
-            | Lint -> [ "fsharplint"; "lint" ]
-            | Tests -> [ "run" ]
-            | Pack -> [ "pack" ]
-            | Publish -> [ "publish" ]
-            | Fable -> [ "fable" ]
-            | FableWatch -> [ "fable"; "watch" ]
-            | Run -> [ "run" ]
-            | WatchRun -> [ "watch"; "run" ]
-        | Nuget nuget ->
-            "dotnet",
-            match nuget with
-            | Push -> [ "nuget"; "push" ]
-            | AddSource -> [ "nuget"; "add"; "source" ]
-        | Npm npm ->
-            npmPath (),
-            match npm with
-            | Install -> [ "install" ]
-            | Version -> [ "--version" ]
-        | Mirrord -> "mirrord", []
-        | Raw exe -> exe, []
+            | Dotnet dotnet ->
+                "dotnet",
+                match dotnet with
+                | Build -> [ "build" ]
+                | Restore -> [ "restore" ]
+                | Lint -> [ "fsharplint"; "lint" ]
+                | Tests -> [ "run" ]
+                | Pack -> [ "pack" ]
+                | Publish -> [ "publish" ]
+                | Fable -> [ "fable" ]
+                | FableWatch -> [ "fable"; "watch" ]
+                | Run -> [ "run" ]
+                | WatchRun -> [ "watch"; "run" ]
+            | Nuget nuget ->
+                "dotnet",
+                "nuget"
+                :: match nuget with
+                   | Push -> [ "push" ]
+                   | AddSource -> [ "add"; "source" ]
+            | Npm npm ->
+                npmPath (),
+                match npm with
+                | Install -> [ "install" ]
+                | Version -> [ "--version" ]
+            | Mirrord -> "mirrord", []
+            | Raw cmd -> cmd, []
 
     [<RequireQualifiedAccess>]
     module Rtk =
@@ -140,29 +145,73 @@ module internal Commands =
             | Raw
 
         let mode: Command -> Transport * Filter option = function
-        | Dotnet Build -> Transport.Err, Some (Filter.dotnetBuild (Directory.GetCurrentDirectory ()))
-        | Dotnet Lint -> Transport.Raw, Some (Filter.fsharplint (Directory.GetCurrentDirectory ()))
-        | Dotnet Tests -> Transport.Test, None
-        | Dotnet Pack -> Transport.Err, None
-        | Dotnet Fable -> Transport.Err, None
-        | Npm Install -> Transport.Err, None
-        | Dotnet (Publish | Run | WatchRun | FableWatch) -> Transport.Raw, None
-        | Npm Version -> Transport.Raw, None
-        | Nuget _ -> Transport.Raw, None
-        | Mirrord -> Transport.Raw, None
-        | Command.Raw _ -> Transport.Raw, None
+            | Dotnet Build -> Transport.Err, Some (Filter.dotnetBuild (Directory.GetCurrentDirectory ()))
+            | Dotnet Publish -> Transport.Raw, Some (Filter.dotnetPublish (Directory.GetCurrentDirectory ()))
+            | Dotnet Lint -> Transport.Raw, Some (Filter.fsharplint (Directory.GetCurrentDirectory ()))
+            | Dotnet Tests -> Transport.Test, None
+            | Dotnet Pack -> Transport.Err, Some (Filter.dotnetPack (Directory.GetCurrentDirectory ()))
+            | Dotnet Restore -> Transport.Err, Some (Filter.dotnetRestore (Directory.GetCurrentDirectory ()))
+            | Dotnet Fable -> Transport.Err, Some Filter.fable
+            | Npm Install -> Transport.Err, None
+            | Dotnet (Run | WatchRun | FableWatch) -> Transport.Raw, None
+            | Npm Version -> Transport.Raw, None
+            | Nuget _ -> Transport.Raw, None
+            | Mirrord -> Transport.Raw, None
+            | Command.Raw _ -> Transport.Raw, None
 
-        let wrap (transport: Transport) (exe: string) (args: string list): string * string list =
+        let wrap (transport: Transport) (cmd: string) (args: string list): string * string list =
             match transport with
-            | Raw -> exe, args
-            | Err -> "rtk", "err" :: exe :: args
-            | Test -> "rtk", "test" :: exe :: args
+            | Raw -> cmd, args
+            | Err -> "rtk", "err" :: cmd :: args
+            | Test -> "rtk", "test" :: cmd :: args
+
+    /// Label the parallel runner prefixes a job's output lines with.
+    type JobName = JobName of string
+
+    [<RequireQualifiedAccess>]
+    module JobName =
+        let value (JobName name) = name
+
+    type ExitCode = ExitCode of int
+
+    [<RequireQualifiedAccess>]
+    module ExitCode =
+        let value (ExitCode code) = code
+        let isSuccess (ExitCode code) = code = 0
+
+    /// Everything a process wrote to stdout, newlines included.
+    type CapturedOutput = CapturedOutput of string
+
+    [<RequireQualifiedAccess>]
+    module CapturedOutput =
+        let value (CapturedOutput output) = output
+
+    /// How the parallel runner surfaces a job's output.
+    type OutputMode =
+        /// Lines appear as the process writes them — the only option for one that never exits.
+        | Streamed
+        /// Captured, then rendered into the lines to print once the process has exited.
+        | Buffered of (CapturedOutput -> ExitCode -> string list)
+
+    type ParallelJob = {
+        Name: JobName
+        Process: CreateProcess<ProcessResult<unit>>
+        Output: OutputMode
+    }
+
+    /// How a parallel run sequences its jobs' output, chosen by the caller.
+    type OutputSequencing =
+        /// Jobs write to the console as they go, interleaved.
+        | Live
+        /// Captured from every job — a `Streamed` one included — then printed as one block per job,
+        /// in job order, once every job has exited. Requires every job to terminate.
+        | GroupedByJob
 
     // ---- Runners ----
 
-    let private spawn dir (exe: string) (args: string list) =
+    let private spawn dir (cmd: string) (args: string list) =
         let proc =
-            CreateProcess.fromRawCommand exe args |> CreateProcess.withWorkingDirectory dir
+            CreateProcess.fromRawCommand cmd args |> CreateProcess.withWorkingDirectory dir
 
         if isRtkActive then
             proc |> CreateProcess.disableTraceCommand
@@ -178,13 +227,9 @@ module internal Commands =
 
     let private wrapped (command: Command) (args: string list) (dir: string) =
         let transport, _ = plan command
-        let exe, verb = Command.render command
-        let exe', args' = Rtk.wrap transport exe (verb @ args)
-        spawn dir exe' args'
-
-    /// The post-filter is applied by `run`, not here — safe for parallel use.
-    let toProcess (command: Command) (args: string list) (dir: string) =
-        wrapped command args dir |> CreateProcess.ensureExitCode
+        let cmd, verb = Command.render command
+        let cmd', args' = Rtk.wrap transport cmd (verb @ args)
+        spawn dir cmd' args'
 
     // ---- Full-output tee ----
 
@@ -207,36 +252,243 @@ module internal Commands =
             let unique = Path.GetRandomFileName().Substring (0, 8)
             let path = teeDir </> sprintf "%d_%s_%s.log" stamp slug unique
             File.writeString false path output
-            rotateTee 20
+            // Rotation is best-effort cleanup; a failure here must not void the hint we can return.
+            try rotateTee 20 with _ -> ()
             Some (sprintf "[full output: %s]" path)
         with _ ->
             None
 
+    /// A failing run whose filter dropped meaningful lines has left the caller unable to see what
+    /// actually went wrong, so its full log is worth teeing. A clean run — or a failing one whose
+    /// filter kept every meaningful line — has not.
+    let internal shouldTee (exitCode: ExitCode) (CapturedOutput raw) (filtered: string list) =
+        let meaningful lines =
+            lines |> Seq.filter (fun (l: string) -> l.Trim () <> "") |> Seq.length
+
+        not (ExitCode.isSuccess exitCode) && meaningful (raw.Split '\n') > meaningful filtered
+
+    /// Lines to print for a finished buffered run: the filtered output, plus a `[full output: …]`
+    /// hint when a failing run had output suppressed — the filtered lines are all the caller sees.
+    let private report (command: Command) (filter: RtkFilter.Filter) (captured: CapturedOutput) (exitCode: ExitCode): string list =
+        let (CapturedOutput raw) = captured
+        let filtered = RtkFilter.runBuffered filter raw (ExitCode.value exitCode)
+
+        if shouldTee exitCode captured filtered then
+            filtered @ (teeFullOutput command raw |> Option.toList)
+        else
+            filtered
+
+    /// Exit-code handling belongs to the parallel runner, which prints a buffered job's report
+    /// before failing the build, so the process carries no `ensureExitCode`.
+    let toJob (name: JobName) (command: Command) (args: string list) (dir: string): ParallelJob = {
+        Name = name
+        Process = wrapped command args dir
+        Output =
+            match plan command |> snd with
+            | Some filter -> Buffered (report command filter)
+            | None -> Streamed
+    }
+
+    /// rtk closes a clean run with an `[ok] …` line carrying no newline, so even an unfiltered
+    /// rtk run has to be captured and reprinted; a direct spawn keeps the console it inherited.
+    let private outputFilter: Rtk.Transport * RtkFilter.Filter option -> RtkFilter.Filter option = function
+        | Rtk.Transport.Raw, None -> None
+        | _, None -> Some RtkFilter.Filter.passthrough
+        | _, filter -> filter
+
     let private exitCode (command: Command) (args: string list) (dir: string): int =
-        match plan command with
-        | _, Some filter ->
+        match plan command |> outputFilter with
+        | Some filter ->
             let result = wrapped command args dir |> CreateProcess.redirectOutput |> Proc.run
-            let raw = result.Result.Output
-            let filtered = RtkFilter.runBuffered filter raw result.ExitCode
 
-            filtered |> List.iter (printfn "%s")
-
-            let meaningful lines =
-                lines |> Seq.filter (fun (l: string) -> l.Trim () <> "") |> Seq.length
-
-            if result.ExitCode <> 0 && meaningful (raw.Split '\n') > meaningful filtered then
-                teeFullOutput command raw |> Option.iter (printfn "%s")
+            report command filter (CapturedOutput result.Result.Output) (ExitCode result.ExitCode)
+            |> List.iter (printfn "%s")
 
             eprintf "%s" result.Result.Error
             result.ExitCode
-        | _, None -> (wrapped command args dir |> Proc.run).ExitCode
+        | None -> (wrapped command args dir |> Proc.run).ExitCode
 
     /// Raises on a non-zero exit code.
     let run (command: Command) (args: string list) (dir: string) =
         match exitCode command args dir with
         | 0 -> ()
         | code ->
-            let exe, verb = Command.render command
-            failwithf "`%s` exited with code %d" (exe :: verb |> String.concat " ") code
+            let cmd, verb = Command.render command
+            failwithf "`%s` exited with code %d" (cmd :: verb |> String.concat " ") code
 
     let runInRoot (command: Command) (args: string list) = run command args "."
+
+    // ---- Parallel runner ----
+
+    module private Parallel =
+        let locker = obj ()
+
+        let colors = [|
+            ConsoleColor.Blue
+            ConsoleColor.Yellow
+            ConsoleColor.Magenta
+            ConsoleColor.Cyan
+            ConsoleColor.DarkBlue
+            ConsoleColor.DarkYellow
+            ConsoleColor.DarkMagenta
+            ConsoleColor.DarkCyan
+        |]
+
+        let print color (colored: string) (line: string) =
+            lock
+                locker
+                (fun () ->
+                    let currentColor = Console.ForegroundColor
+                    Console.ForegroundColor <- color
+                    Console.Write colored
+                    Console.ForegroundColor <- currentColor
+                    Console.WriteLine line
+                )
+
+        let onStdout index (JobName name) (line: string) =
+            let color = colors[index % colors.Length]
+
+            if isNull line then
+                print color $"{name}: --- END ---" ""
+            else if String.isNotNullOrEmpty line then
+                print color $"{name}: " line
+
+        let onStderr (JobName name) (line: string) =
+            let color = ConsoleColor.Red
+
+            if isNull line |> not then
+                print color $"{name}: " line
+
+        let printStartingJob index (job: ParallelJob) =
+            let color = colors[index % colors.Length]
+            let name = job.Name |> JobName.value
+            let wd = job.Process.WorkingDirectory |> Option.defaultValue ""
+            let exe = job.Process.Command.Executable
+            let args = job.Process.Command.Arguments.ToStartInfo
+            print color $"{name}: {wd}> {exe} {args}" ""
+
+        let printStarting indexed =
+            for index, job in indexed do
+                printStartingJob index job
+
+        let private streamProcess (job: ParallelJob) onOut onErr =
+            job.Process
+            |> CreateProcess.redirectOutputIfNotRedirected
+            |> CreateProcess.withOutputEvents onOut onErr
+            |> Proc.run
+            |> _.ExitCode
+            |> ExitCode
+
+        let private runStreaming index (job: ParallelJob) =
+            streamProcess job (onStdout index job.Name) (onStderr job.Name)
+
+        let private printBlock index (JobName name) lines =
+            let color = colors[index % colors.Length]
+
+            for line in lines do
+                print color $"{name}: " line
+
+        let private printLines index lines =
+            let color = colors[index % colors.Length]
+
+            for line in lines do
+                print color "" line
+
+        /// Runs a job to completion with output captured, returning its lines and stderr. A buffered
+        /// job is rendered through its report; anything else yields its raw non-empty lines.
+        let private runCaptured (job: ParallelJob) =
+            let result = job.Process |> CreateProcess.redirectOutput |> Proc.run
+            let code = ExitCode result.ExitCode
+
+            let lines =
+                match job.Output with
+                | Buffered report -> report (CapturedOutput result.Result.Output) code
+                | Streamed ->
+                    RtkFilter.toLines result.Result.Output
+                    |> List.filter String.isNotNullOrEmpty
+
+            (lines, result.Result.Error), code
+
+        /// A buffered job yields nothing until it exits, so its whole report is printed in one
+        /// locked pass — otherwise a concurrent job's live lines would split the block.
+        let private runBuffered index (job: ParallelJob) =
+            let (lines, error), code = runCaptured job
+
+            lock locker (fun () -> printBlock index job.Name lines)
+
+            eprintf "%s" error
+            code
+
+        let private restoreTerminalState () =
+            // Reset basic TTY state in case an interrupted child process leaves it broken.
+            // Without a terminal on stdin there is nothing to reset and `stty` only errors,
+            // which would land in the middle of a buffered job's block.
+            if not Console.IsInputRedirected then
+                try
+                    use procHandle =
+                        Diagnostics.Process.Start (
+                            Diagnostics.ProcessStartInfo (
+                                FileName = "stty",
+                                Arguments = "sane",
+                                UseShellExecute = false,
+                                RedirectStandardOutput = true,
+                                RedirectStandardError = true
+                            )
+                        )
+
+                    procHandle.WaitForExit 1000 |> ignore
+                with _ ->
+                    ()
+
+        /// Every job runs to completion with its output captured, then the blocks print in job
+        /// order. Requires every job to terminate — a job that never exits stalls the whole run.
+        let private runGrouped (indexed: (int * ParallelJob)[]) =
+            indexed
+            |> Array.Parallel.map (fun (index, job) ->
+                let (lines, error), code = runCaptured job
+                index, job, lines, error, code
+            )
+            |> Array.map (fun (index, job, lines, error, code) ->
+                printStartingJob index job
+                printLines index lines
+                eprintf "%s" error
+                job.Name, code
+            )
+
+        let run sequencing jobs =
+            try
+                let indexed = jobs |> Seq.toArray |> Array.indexed
+
+                match sequencing with
+                | Live ->
+                    printStarting indexed
+
+                    indexed
+                    |> Array.Parallel.map (fun (index, job) ->
+                        let code =
+                            match job.Output with
+                            | Streamed -> runStreaming index job
+                            | Buffered _ -> runBuffered index job
+
+                        job.Name, code
+                    )
+                | GroupedByJob -> runGrouped indexed
+            finally
+                restoreTerminalState ()
+
+    /// Raises when any job exits non-zero, after every job has finished and reported.
+    let runParallelWith (sequencing: OutputSequencing) (jobs: seq<ParallelJob>) =
+        match
+            jobs
+            |> Parallel.run sequencing
+            |> Array.filter (snd >> ExitCode.isSuccess >> not)
+        with
+        | [||] -> ()
+        | failed ->
+            failed
+            |> Array.map (fun (name, code) -> sprintf "%s (exit %d)" (JobName.value name) (ExitCode.value code))
+            |> String.concat ", "
+            |> failwithf "Parallel run failed: %s"
+
+    /// Raises when any job exits non-zero, after every job has finished and reported.
+    let runParallel: seq<ParallelJob> -> unit = runParallelWith Live

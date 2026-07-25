@@ -69,6 +69,17 @@ module Utils =
             | None -> failwith error
 
     [<RequireQualifiedAccess>]
+    module Solution =
+        /// `.slnx` wins over `.sln`; `None` when the candidates hold neither.
+        let pick (candidates: seq<string>): string option =
+            let firstWith extension =
+                candidates
+                |> Seq.filter (fun candidate -> IO.Path.GetExtension(candidate).ToLowerInvariant () = extension)
+                |> Seq.tryHead
+
+            firstWith ".slnx" |> Option.orElse (firstWith ".sln")
+
+    [<RequireQualifiedAccess>]
     module Nuget =
         let push releaseDir organization token =
             let sourceName =
