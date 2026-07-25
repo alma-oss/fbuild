@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Library</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <IsPackable>true</IsPackable>
+        <AssemblyName>Alma.Build</AssemblyName>
+        <PackageId>Alma.Build</PackageId>
+        <Version>2.0.0</Version>
+        <Authors>Almacareer</Authors>
+        <Company>Almacareer</Company>
+        <Description>FAKE + Paket build engine for F# projects.</Description>
+        <NoWarn>NU1510</NoWarn>
+        <NoDefaultExcludes>true</NoDefaultExcludes>
+        <!-- Pack the vendored support files as content/ -->
+        <IncludeContentInPack>true</IncludeContentInPack>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="RtkFilter.fs" />
+        <Compile Include="Commands.fs" />
+        <Compile Include="Utils.fs" />
+        <Compile Include="SafeBuildHelpers.fs" />
+        <Compile Include="Targets.fs" />
+    </ItemGroup>
+
+    <!-- `vendored/` holds the support files; the repo root carries symlinks to them because it is
+         its own first consumer. Pack targets the real files so nothing depends on how the checkout
+         materialised the links. -->
+    <ItemGroup>
+        <FbuildAsset Include="..\..\vendored\build.sh" />
+        <FbuildAsset Include="..\..\vendored\README.fbuild.md" />
+        <FbuildAsset Include="..\..\vendored\fsharplint.json" />
+        <FbuildAsset Include="..\..\vendored\.editorconfig" />
+    </ItemGroup>
+    <ItemGroup>
+        <Content Include="@(FbuildAsset)" Pack="true" PackagePath="content\%(Filename)%(Extension)" />
+    </ItemGroup>
+
+    <Import Project="..\..\.paket\Paket.Restore.targets" />
+</Project>

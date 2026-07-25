@@ -1,0 +1,5 @@
+group Build
+    source https://api.nuget.org/v3/index.json
+    source local-feed
+
+    nuget Alma.Build 2.0.0
