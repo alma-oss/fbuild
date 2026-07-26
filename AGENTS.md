@@ -33,12 +33,16 @@ dotnet run --project ./build/build.fsproj -- Build
 
 # Repack engine and validate package-based path
 ./bootstrap.sh Build
+
+# Unit tests only; the `Tests` target runs the integration matrix too
+dotnet run --project tests/unit/unit.fsproj --
 ```
 
 Target notes:
 
 - Default target is `Build`.
 - Main `Library` flow is: `Clean -> AssemblyInfo -> Build -> Lint -> Tests -> Release -> Publish`.
+- The integration matrix drives a full target graph per fixture, so it takes minutes and needs `npm` and the NuGet feeds. It deletes its temp fixture copy per scenario; run with `FBUILD_KEEP_TEMP=1` to keep the copies when debugging a failure.
 
 ## Validation checklist
 

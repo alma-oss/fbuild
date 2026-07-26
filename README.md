@@ -80,6 +80,24 @@ Example:
 dotnet run --project ./build/build.fsproj -- Build no-lint
 ```
 
+## Tests
+
+The `Tests` target runs both suites. To run one directly:
+
+```bash
+dotnet run --project tests/unit/unit.fsproj --
+dotnet run --project tests/integration/integration.fsproj --
+```
+
+The integration matrix is slow: each scenario copies a fixture from `tests/integration/fixtures/`
+to a temp directory and drives a full target graph through it, so it needs `npm` and the NuGet
+feeds. The copy is deleted when the scenario finishes; set `FBUILD_KEEP_TEMP` to keep it for
+inspection, at the cost of a full build tree per scenario left in `$TMPDIR`.
+
+```bash
+FBUILD_KEEP_TEMP=1 dotnet run --project tests/integration/integration.fsproj --
+```
+
 ## Versioning and releases
 
 - `src/Alma.Build/Alma.Build.fsproj` carries the package `Version` and metadata.

@@ -23,6 +23,12 @@
         <Compile Include="Targets.fs" />
     </ItemGroup>
 
+    <!-- RtkFilter and Commands are internal; the unit test assembly reaches them here rather than
+         through the FAKE-only generated AssemblyInfo, which a plain `dotnet test` never produces. -->
+    <ItemGroup>
+        <InternalsVisibleTo Include="Alma.Build.Tests" />
+    </ItemGroup>
+
     <!-- `vendored/` holds the support files; the repo root carries symlinks to them because it is
          its own first consumer. Pack targets the real files so nothing depends on how the checkout
          materialised the links. -->

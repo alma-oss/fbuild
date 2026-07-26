@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="test.rootlibrary.fsproj" />
+  <Project Path="tests/Tests.fsproj" />
+</Solution>

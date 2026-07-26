@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <IsPackable>false</IsPackable>
+        <AssemblyName>Alma.Build.Tests</AssemblyName>
+        <!-- The SDK's implicit FSharp.Core (10.0) would shadow the explicit 10.1.300 below. -->
+        <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="RtkFilterTests.fs" />
+        <Compile Include="CommandTests.fs" />
+        <Compile Include="UtilsTests.fs" />
+        <Compile Include="Program.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Alma.Build\Alma.Build.fsproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- Match the engine's paket-resolved FSharp.Core so the referenced Alma.Build.dll,
+             compiled against 10.1.0.0, loads at runtime. -->
+        <PackageReference Include="FSharp.Core" Version="10.1.300" />
+        <PackageReference Include="Expecto" Version="10.2.1" />
+    </ItemGroup>
+</Project>
