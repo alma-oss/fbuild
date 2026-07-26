@@ -38,9 +38,10 @@ module Utils =
             try
                 runTarget ()
                 0
-            // CompactTrace mutes the Build Time Report and its failure status; keep the failure visible
-            with :? BuildFailedException as ex when isRtkActive ->
-                eprintfn "%s" ex.Message
+            // CompactTrace mutes the Build Time Report and its failure status, so under RTK the
+            // message is all that is left to report; otherwise the inner detail is worth keeping.
+            with :? BuildFailedException as ex ->
+                eprintfn "%s" (if isRtkActive then ex.Message else string ex)
                 1
 
     let tee f a =
