@@ -25,12 +25,15 @@ module Utils =
 
             CompactTrace.install ()
 
+        let defaultTarget = "Build"
+
         let run args =
             let runTarget () =
-                match args with
-                | [| "-t"; target |] -> Target.runOrDefault target
-                | [| target |] -> Target.runOrDefaultWithArguments target
-                | _ -> Target.runOrDefaultWithArguments "Build"
+                match args |> Array.toList with
+                | []
+                | [ "-t" ] -> Target.run 1 defaultTarget []
+                | "-t" :: target :: buildArguments
+                | target :: buildArguments -> Target.run 1 target buildArguments
 
             try
                 runTarget ()
