@@ -240,9 +240,11 @@ module Targets =
 
         if not definition.Specs.IsSAFEStack then
             Target.create "Tests" (fun _ ->
-                if definition.Sources.Tests |> Seq.isEmpty
-                then Trace.tracefn "There are no tests yet."
-                else run (Dotnet Tests) [ "--no-build" ] "tests"
+                match definition.Sources.Tests |> List.ofSeq with
+                | [] -> Trace.tracefn "There are no tests yet."
+                | projects ->
+                    projects
+                    |> List.iter (fun project -> run (Dotnet Tests) [ "--no-build"; "--project"; project ] ".")
             )
 
             let zipRelease releaseDir runtimeIds =

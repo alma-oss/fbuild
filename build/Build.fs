@@ -1,4 +1,5 @@
 open Fake.Core
+open Fake.IO.Globbing.Operators
 
 open Alma.Build
 open Utils
@@ -19,6 +20,9 @@ let main args =
                 fun library -> {
                     library with
                         NugetApi = NugetApi.KeyInEnvironment "NUGET_API_KEY"
+                        // One level only: `tests/**` would sweep in the integration matrix's
+                        // fixture projects, which are inputs to a test rather than tests.
+                        TestsSources = !! "tests/*/*.fsproj"
                 }
             )
     }
