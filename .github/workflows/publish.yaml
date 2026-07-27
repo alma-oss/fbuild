@@ -1,0 +1,29 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - '[0-9]+\.[0-9]+\.[0-9]+'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.x
+
+      - name: Publish to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          DOTNET_ROLL_FORWARD: latestMajor
+        # fbuild builds itself: the engine it needs is not on a feed, so it is packed from
+        # source into local-feed/ first. `build.sh` alone cannot resolve Alma.Build.
+        run: ./bootstrap.sh -t publish
