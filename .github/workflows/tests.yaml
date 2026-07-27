@@ -13,7 +13,7 @@ jobs:
       matrix:
         os:
           - name: ubuntu-latest
-            run: ./bootstrap.sh
+            run: ./build.sh
     runs-on: ${{ matrix.os.name }}
 
     env:
@@ -35,9 +35,6 @@ jobs:
         with:
           node-version: 24
 
-      # `build.sh` cannot be used here: this repository builds itself, and the engine it needs is
-      # neither committed (local-feed/ is git-ignored) nor on a public feed, so paket cannot resolve
-      # it until bootstrap.sh has packed it from source.
       - name: Lint and unit tests
         if: github.event_name == 'pull_request'
         run: |

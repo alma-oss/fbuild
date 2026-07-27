@@ -28,11 +28,9 @@ Prefer small diffs, clear validation, and no unrelated refactors.
 Use repository-root commands:
 
 ```bash
-# Default build target
-dotnet run --project ./build/build.fsproj -- Build
-
-# Repack engine and validate package-based path
-./bootstrap.sh Build
+# Default build target; the build project references the engine as a project, so engine
+# edits take effect on the next run
+./build.sh Build
 
 # Unit tests only; the `Tests` target runs the integration matrix too
 dotnet run --project tests/unit/unit.fsproj --
@@ -49,9 +47,11 @@ Target notes:
 After changes, run what is relevant:
 
 1. Engine or target logic changed:
-   - `./bootstrap.sh Build`
+   - `./build.sh Build`
 2. Packaging/versioning changed:
    - verify `src/Alma.Build/Alma.Build.fsproj` `Version` and `CHANGELOG.md` consistency.
+   - run the packaged scenario, the only coverage of the package as a consumer receives it:
+     `dotnet run --project tests/integration/integration.fsproj -- --filter-test-case "library, packaged engine"`
 
 If a project/package was renamed and pack/restore behaves oddly, clear stale artifacts in the renamed project `obj/` and `bin/` before re-running validation.
 

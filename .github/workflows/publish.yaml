@@ -24,6 +24,4 @@ jobs:
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
           DOTNET_ROLL_FORWARD: latestMajor
-        # fbuild builds itself: the engine it needs is not on a feed, so it is packed from
-        # source into local-feed/ first. `build.sh` alone cannot resolve Alma.Build.
-        run: ./bootstrap.sh -t publish
+        run: ./build.sh -t publish

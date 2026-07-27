@@ -21,23 +21,31 @@ let fixtures = Path.Combine (root, "tests", "integration", "fixtures")
 
 // ---- Process execution ----
 
-let exec (workDir: string) (exe: string) (args: string) =
+let execWith (env: (string * string) list) (workDir: string) (exe: string) (args: string) =
     let psi = ProcessStartInfo (exe, args)
     psi.WorkingDirectory <- workDir
     psi.RedirectStandardOutput <- true
     psi.RedirectStandardError <- true
     psi.UseShellExecute <- false
+
+    for name, value in env do
+        psi.Environment[name] <- value
+
     use p = Process.Start psi
     let stdout = p.StandardOutput.ReadToEnd ()
     let stderr = p.StandardError.ReadToEnd ()
     p.WaitForExit ()
     p.ExitCode, stdout, stderr
 
-let execOk workDir exe args =
-    let code, out, err = exec workDir exe args
+let exec (workDir: string) (exe: string) (args: string) = execWith [] workDir exe args
+
+let execWithOk env workDir exe args =
+    let code, out, err = execWith env workDir exe args
 
     if code <> 0 then
         failwith $"Command failed ({code}):\n  {exe} {args}\nstdout:\n{out}\nstderr:\n{err}"
+
+let execOk workDir exe args = execWithOk [] workDir exe args
 
 // ---- Fixture preparation ----
 
@@ -102,8 +110,127 @@ let private prepare (fixture: string) =
 
     dir
 
+// ---- Packaged engine ----
+
+/// Version the packaged case stamps on the engine it builds. It must be one nuget.org does not
+/// carry: the consumer needs nuget.org in its sources for the engine's own dependencies, and a
+/// version present on both feeds could resolve to the published package instead of this build.
+let private packagedVersion = "99.0.0-integration"
+
+/// The consumer-side `build/build.fsproj` from the adoption steps in `README.md`: no reference to
+/// the engine at all, the package arrives through `build/paket.references`.
+let private packagedBuildFsproj =
+    """<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <IsPackable>false</IsPackable>
+        <NoWarn>NU1510</NoWarn>
+    </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="Build.fs" />
+    </ItemGroup>
+    <Import Project="..\.paket\Paket.Restore.targets" />
+</Project>
+"""
+
+let private packagedTools =
+    """{
+    "version": 1,
+    "isRoot": true,
+    "tools": {
+        "paket": { "version": "10.3.1", "commands": [ "paket" ] },
+        "dotnet-fsharplint": { "version": "0.26.10", "commands": [ "dotnet-fsharplint" ] }
+    }
+}
+"""
+
+let private packagedDependencies (feed: string) =
+    $"""group Build
+    source https://api.nuget.org/v3/index.json
+    source {feed}
+
+    nuget Alma.Build {packagedVersion}
+"""
+
+/// Packs the engine into `feed` under `packagedVersion`, keeping its intermediate and output paths
+/// inside the throwaway directory: the scenarios run in parallel and build the engine project from
+/// source, so packing through the shared `src/Alma.Build/obj` would race with them.
+let private packEngine (dir: string) (feed: string) =
+    let separator = Path.DirectorySeparatorChar
+    let intermediate = Path.Combine (dir, "engine-obj")
+    let output = Path.Combine (dir, "engine-bin")
+
+    let args =
+        $"pack \"{engineProject}\" -c Release -o \"{feed}\" /p:Version={packagedVersion} "
+        + $"/p:BaseIntermediateOutputPath=\"{intermediate}{separator}\" "
+        + $"/p:BaseOutputPath=\"{output}{separator}\""
+
+    execOk root "dotnet" args
+
+/// The support files the engine ships as `content/`, which a consumer copies to its repo root.
+let private packagedAssets = [ "build.sh"; "README.fbuild.md"; "fsharplint.json"; ".editorconfig" ]
+
+let private packageContentDir (dir: string) (cache: string) =
+    [
+        Path.Combine (dir, "packages", "build", "Alma.Build", "content")
+        Path.Combine (cache, "alma.build", packagedVersion, "content")
+    ]
+    |> List.tryFind Directory.Exists
+    |> Option.defaultWith (fun () -> failwith $"Restored engine package carries no content/ directory in {dir}")
+
+/// Completes a fixture copy into a consumer that resolves the engine as a NuGet package, following
+/// the adoption steps in `README.md`: paket files pinning the engine, the consumer `build.fsproj`,
+/// `paket install` to write `paket.lock` and `.paket/Paket.Restore.targets`, and the support files
+/// vendored out of the package's own `content/` instead of this repo's root.
+///
+/// Restores run against a NuGet cache inside the throwaway directory. The engine version does not
+/// move between packs, so a cache shared with the machine would hand back an earlier build of it.
+let private preparePackaged (fixture: string) =
+    let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-packaged-{fixture}-{Guid.NewGuid():N}")
+    copyInto (Path.Combine (fixtures, fixture)) dir
+
+    let feed = Path.Combine (dir, "feed")
+    let cache = Path.Combine (dir, "nuget-cache")
+    let env = [ "NUGET_PACKAGES", cache ]
+
+    packEngine dir feed
+
+    File.WriteAllText (Path.Combine (dir, "paket.dependencies"), packagedDependencies feed)
+    File.WriteAllText (Path.Combine (dir, "build", "paket.references"), "group Build\n    Alma.Build\n")
+    File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), packagedBuildFsproj)
+    File.WriteAllText (Path.Combine (dir, ".config", "dotnet-tools.json"), packagedTools)
+
+    execOk dir "git" "init"
+    execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
+    execWithOk env dir "dotnet" "tool restore"
+    execWithOk env dir "dotnet" "tool run paket install"
+
+    let content = packageContentDir dir cache
+
+    for asset in packagedAssets do
+        File.Copy (Path.Combine (content, asset), Path.Combine (dir, asset), true)
+
+    dir, env
+
 let private keepTemp =
     Environment.GetEnvironmentVariable "FBUILD_KEEP_TEMP" |> String.IsNullOrEmpty |> not
+
+let private cleanup (dir: string) =
+    if keepTemp then printfn $"FBUILD_KEEP_TEMP set, kept fixture copy: {dir}"
+    else Directory.Delete (dir, true)
+
+/// Runs `target` through the packaged engine's own vendored `build.sh`, then hands the consumer
+/// directory to `assertArtifacts`. `bash` runs the script directly because the copy out of the
+/// package does not carry its executable bit.
+let withPackagedFixture (fixture: string) (target: string) (assertArtifacts: string -> unit) =
+    let dir, env = preparePackaged fixture
+
+    try
+        execWithOk env dir "bash" $"./build.sh {target}"
+        assertArtifacts dir
+    finally
+        cleanup dir
 
 /// Runs `body` against a freshly prepared fixture copy, deleting the copy afterwards whether
 /// `body` succeeds or throws. Set `FBUILD_KEEP_TEMP` to keep it for inspection.
@@ -113,5 +240,4 @@ let withFixture (fixture: string) (body: string -> unit) =
     try
         body dir
     finally
-        if keepTemp then printfn $"FBUILD_KEEP_TEMP set, kept fixture copy: {dir}"
-        else Directory.Delete (dir, true)
+        cleanup dir

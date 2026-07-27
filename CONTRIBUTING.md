@@ -18,38 +18,22 @@ updating — see [`README.md`](README.md).
 
 ## Build this repository
 
-### Fresh clone
-
-The self-host build resolves `Alma.Build` from `local-feed/`, which is generated, not
-committed. Run bootstrap once so the feed exists:
-
-```bash
-./bootstrap.sh Build
-```
-
-### Fast path
-
-Afterwards, run the self-host build directly:
+`build/build.fsproj` references `src/Alma.Build/Alma.Build.fsproj` as a project, so the
+self-host build always runs whatever engine source is checked out. A fresh clone needs no
+preparation step:
 
 ```bash
-dotnet run --project ./build/build.fsproj -- Build
+./build.sh Build
 ```
 
-### After engine changes
-
-Engine edits are invisible to the build until the package is repacked. Run bootstrap to
-repack and validate:
-
-```bash
-./bootstrap.sh Build
-```
+Engine edits take effect on the next run — there is nothing to repack.
 
 ## Targets
 
-Run targets through the self-host entrypoint:
+Run targets through the entry point:
 
 ```bash
-dotnet run --project ./build/build.fsproj -- <Target>
+./build.sh <Target>
 ```
 
 This repository uses the `Library` spec; its targets and arguments are listed in
@@ -72,6 +56,25 @@ inspection, at the cost of a full build tree per scenario left in `$TMPDIR`.
 ```bash
 FBUILD_KEEP_TEMP=1 dotnet run --project tests/integration/integration.fsproj --
 ```
+
+The matrix runs each scenario against the engine built from source. One scenario instead packs
+the engine, installs it into a throwaway consumer through Paket, and drives the build with the
+`build.sh` shipped inside the package — that is what covers the nuspec dependencies and the
+`content/` payload before a release goes out.
+
+## When the engine will not build
+
+The self-host build runs on the engine it is compiling, so engine source that does not compile
+takes `./build.sh` down with it. Nothing needed to recover goes through the engine:
+
+```bash
+dotnet build src/Alma.Build/Alma.Build.fsproj              # compile-fix loop
+dotnet run --project tests/unit/unit.fsproj --             # unit suite
+dotnet fsharplint lint src/Alma.Build/Alma.Build.fsproj    # lint
+dotnet pack src/Alma.Build/Alma.Build.fsproj -c Release -o release   # release artifact
+```
+
+`git stash` or `git revert` on the engine source restores a working `./build.sh` outright.
 
 ## Versioning and releases
 

@@ -71,10 +71,6 @@ dotnet run --project ./build/build.fsproj -- <Target>
 # Skip clean / skip lint
 dotnet run --project ./build/build.fsproj -- Build no-clean no-lint
 
-# Repack the engine into local-feed/ and validate the packaged path.
-# Run this after editing src/Alma.Build/.
-./bootstrap.sh Build
-
 # Standard wrapper: restores tools + paket, then runs the build
 ./build.sh <Target>
 
@@ -123,9 +119,8 @@ Every other target is serial.
 CHANGELOG.md            # release notes; parsed by the AssemblyInfo target
 CONTRIBUTING.md         # working on the engine itself
 fbuild.slnx             # solution: src/Alma.Build, build, both test projects
-paket.dependencies      # group Build → nuget Alma.Build <version>
+paket.dependencies      # group Build → the engine's own FAKE dependencies
 paket.lock              # authoritative version pin
-bootstrap.sh            # repack engine → local-feed, paket restore, run build
 build.sh                # symlink to vendored/build.sh — also this repo's entry point
 fsharplint.json         # symlink to vendored/fsharplint.json
 .editorconfig           # symlink to vendored/.editorconfig
@@ -148,23 +143,22 @@ src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
   Alma.Build.fsproj     #   Version + metadata; packs the vendored files as content/
   paket.references      #   FAKE dependencies (group Build)
 
-build/                  # SELF-HOST runner; mirrors a consumer's build/ directory
+build/                  # SELF-HOST runner
   Build.fs              #   Library spec over src/Alma.Build
-  build.fsproj          #   imports ..\.paket\Paket.Restore.targets
-  paket.references      #   Alma.Build
+  build.fsproj          #   ProjectReference to src/Alma.Build
 
 tests/
   unit/                 # Expecto; reaches the internal modules via InternalsVisibleTo
-  integration/          # Expecto; one end-to-end scenario per spec case
+  integration/          # Expecto; one end-to-end scenario per spec case, plus one
+                        # that consumes the engine as a package
     fixtures/           #   a complete consumer repo per case, Build.fs included
 
 .github/workflows/      # pr-check, tests, publish
-local-feed/             # local NuGet feed for dev/test
 release/                # packed artifacts (git-ignored)
 docs/                   # this document and design notes
 ```
 
-Git-ignored: `bin/`, `obj/`, `release/`, `local-feed/`, `.paket/`, `packages/`, `paket-files/`,
+Git-ignored: `bin/`, `obj/`, `release/`, `.paket/`, `packages/`, `paket-files/`,
 `.fake/`, `.ionide/`, and generated `AssemblyInfo.fs`.
 
 ### A consuming repository
@@ -304,11 +298,9 @@ release notes → CI runs the build → merge when green.
 **Override / fork:** override a target from `Build.fs` via `Spec.map*`, or
 vendor the engine source.
 
-**Engine development in this repo:** the self-host build consumes `Alma.Build`
-from `local-feed/`, so after editing engine source run `./bootstrap.sh Build` to
-repack and validate the *packaged* path, which is what consumers actually get.
-Then run the suites that cover what changed (§8) — the integration matrix builds
-the engine from source, so it and the bootstrap gate check different things.
+**Engine development in this repo:** `build/build.fsproj` references the engine
+project directly, so engine edits reach the self-host build on the next run with
+nothing to repack. Then run the suites that cover what changed (§8).
 
 **Release:** bump `Version` in `Alma.Build.fsproj` and `CHANGELOG.md`, merge,
 then push a `X.Y.Z` tag — `publish.yaml` packs and pushes from there.
@@ -396,21 +388,22 @@ Landing on the terminal target pulls the whole chain (`AssemblyInfo`, `Build`,
 matrix exercises whatever is checked out with no repack step in between. Set
 `FBUILD_KEEP_TEMP` to keep a scenario's directory for inspection.
 
-**The packaging gate:** `./bootstrap.sh Build` — repacks the engine into
-`local-feed/`, restores it, and runs the self-host build against the *packaged*
-engine. The matrix builds the engine from source, so packaging is covered only
-here; run bootstrap on any change to `src/Alma.Build/` or its assets.
+**The packaging gate:** the `library, packaged engine` scenario. It packs the
+engine under a version nuget.org does not carry, installs it into a throwaway
+consumer through Paket, vendors the support files out of the package's own
+`content/`, and drives `Release` with the `build.sh` shipped inside the package.
+Every other scenario builds the engine from source, so the nuspec dependency set
+and the `content/` payload are covered only here. Its restores use a NuGet cache
+inside the throwaway directory: the engine version does not move between packs,
+and a shared cache would hand back an earlier build of it.
 
 **CI** (`.github/workflows/`):
 
-- `tests.yaml` — on a pull request, `./bootstrap.sh -t Lint` plus the unit
-  suite. The matrix is minutes of work and needs npm and the NuGet feeds, so it
-  runs on a nightly cron instead, as `./bootstrap.sh -t Tests`. `build.sh`
-  cannot be used in either case: this repo builds itself, and `local-feed/` is
-  git-ignored, so Paket cannot resolve `Alma.Build` until bootstrap has packed
-  it from source.
+- `tests.yaml` — on a pull request, `./build.sh -t Lint` plus the unit suite.
+  The matrix is minutes of work and needs npm and the NuGet feeds, so it runs on
+  a nightly cron instead, as `./build.sh -t Tests`.
 - `pr-check.yaml` — blocks fixup commits, runs ShellCheck.
-- `publish.yaml` — on a `X.Y.Z` tag, `./bootstrap.sh -t publish` with
+- `publish.yaml` — on a `X.Y.Z` tag, `./build.sh -t publish` with
   `NUGET_API_KEY` in the environment.
 
 **Coverage gap:** the matrix runs on `ubuntu-latest` only, and asserts that
@@ -422,9 +415,10 @@ artifacts exist rather than what is in them.
 
 - Keep `Alma.Build.fsproj` `Version`, `CHANGELOG.md`, and
   `paket.dependencies` consistent in the same change.
-- Run `./bootstrap.sh Build` after changing engine source.
 - Run the integration matrix after changing `Targets.fs` — the unit suite does
   not execute a single target.
+- Run the `library, packaged engine` scenario after changing packaging, the
+  package `Version`, or the vendored assets.
 - Edit the vendored assets at the repo root; they are the single source packed
   into the package.
 - Keep user-visible behavior changes in sync with `README.md`, `CONTRIBUTING.md`,
@@ -447,9 +441,9 @@ artifacts exist rather than what is in them.
 
 ## 10. Success criteria
 
-- [x] `dotnet run --project ./build/build.fsproj -- Build` builds this repo.
-- [x] `./bootstrap.sh Build` repacks the engine and the self-host build passes
-      against the packaged engine.
+- [x] `./build.sh Build` builds this repo from a fresh clone.
+- [x] The packaged engine is installed and driven end to end by an automated
+      scenario.
 - [x] A repo following the adoption steps in `README.md` builds with `./build.sh`.
 - [x] Every spec case is covered by an automated end-to-end check — the nightly
       integration matrix.
@@ -473,10 +467,10 @@ artifacts exist rather than what is in them.
 ## 12. Open questions and risks
 
 - **No feed carries the package yet.** `publish.yaml` is wired to push to
-  nuget.org on a version tag, but no version has been published, so
-  `paket.dependencies` still resolves `Alma.Build` from `local-feed/` — dev and
-  test only. Whether the production channel stays public nuget.org or moves to
-  an internal feed, and the auth model if it moves, is unresolved.
+  nuget.org on a version tag, but no version has been published, so no consuming
+  repository can resolve `Alma.Build` at all. Whether the production channel
+  stays public nuget.org or moves to an internal feed, and the auth model if it
+  moves, is unresolved.
 - **Manual vendoring has no drift detection.** Nothing records which version a
   repo's `build.sh` or `fsharplint.json` came from, so a locally edited asset is
   silently overwritten — or silently kept stale — on the next bump.

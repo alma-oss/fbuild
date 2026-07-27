@@ -50,4 +50,13 @@ let matrix =
             Expect.isTrue
                 (anyFile dir "deploy/public" "*.html")
                 "Bundle should build the client bundle into deploy/public/")
+
+        // Every scenario above consumes the engine from source, which leaves the package itself —
+        // its nuspec dependencies, its `content/` payload, the vendored `build.sh` — unexercised
+        // until a consumer installs it. This case is the one that runs that path end to end.
+        testCase "library, packaged engine" <| fun () ->
+            withPackagedFixture "library" "Release" (fun dir ->
+                Expect.isTrue
+                    (anyFile dir "release" "*.nupkg")
+                    "Release should move a .nupkg into release/ when the engine is consumed as a package")
     ]
