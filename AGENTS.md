@@ -59,7 +59,7 @@ If a project/package was renamed and pack/restore behaves oddly, clear stale art
 
 - Add a target behavior:
   - update `src/Alma.Build/Targets.fs`
-  - update docs (`README.md`, `docs/vendoring.md`, `docs/specs/fbuild/spec.md`) if behavior is user-visible
+  - update docs (`README.md`, `CONTRIBUTING.md`, `docs/specs/fbuild/spec.md`) if behavior is user-visible
 - Change a vendored asset:
   - update the file in `vendored/` (`build.sh`, `README.fbuild.md`, `fsharplint.json`, `.editorconfig`) and note it in `CHANGELOG.md` — consumers re-copy these on a version bump
 
@@ -67,8 +67,8 @@ If a project/package was renamed and pack/restore behaves oddly, clear stale art
 
 When behavior changes, keep docs in sync in the same PR:
 
-- repository overview and commands: `README.md`
-- adoption steps for consuming repositories: `docs/vendoring.md`
+- consumer overview, targets, and adoption steps: `README.md`
+- development workflow and commands: `CONTRIBUTING.md`
 - spec, architecture, and distribution details: `docs/specs/fbuild/spec.md`
 - consumer quick reference: `README.fbuild.md`
 

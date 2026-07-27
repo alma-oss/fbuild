@@ -5,62 +5,26 @@
 This repository ships one deliverable: **`Alma.Build`** (`src/Alma.Build/`) — the build
 engine library plus the support files that consuming repositories vendor alongside it.
 
-Consuming repositories adopt the engine by hand: pin the `Alma.Build` package and copy the
-vendored support files into the repo. See [`docs/vendoring.md`](docs/vendoring.md).
-
 Current engine version: `2.0.0` (`Version` in `src/Alma.Build/Alma.Build.fsproj`).
 
-## Repository layout
+## What you get
 
-- `src/Alma.Build/`: core build engine (`Targets`, `Spec`, helpers) and package targets.
-- Repo root: support files vendored into consuming repositories and packed into the engine package (`build.sh`, `README.fbuild.md`, `fsharplint.json`, `.editorconfig`).
-- `build/`: self-host build entrypoint used to build this repo.
-- `docs/vendoring.md`: how to adopt the engine in a consuming repository.
-- `docs/specs/fbuild/spec.md`: architecture and distribution design reference.
+A consuming repository owns a single build file, `build/Build.fs`, which declares a
+`ProjectDefinition` — project metadata plus one `Spec` case — and passes it to
+`Targets.init`. The engine derives the target graph from the spec:
 
-## Prerequisites
+- `Library`
+- `Executable`
+- `ConsoleApplication`
+- `SAFEStackApplication`
 
-- .NET SDK with `net10.0` support.
-- `bash`.
-- `git` (required by build metadata initialization).
-
-## Build this repository
-
-### Fresh clone
-
-The self-host build resolves `Alma.Build` from `local-feed/`, which is generated, not
-committed. Run bootstrap once so the feed exists:
+Targets are then run through the vendored entry point:
 
 ```bash
-./bootstrap.sh Build
+./build.sh <Target>
 ```
 
-### Fast path
-
-Afterwards, run the self-host build directly:
-
-```bash
-dotnet run --project ./build/build.fsproj -- Build
-```
-
-### After engine changes
-
-Engine edits are invisible to the build until the package is repacked. Run bootstrap to
-repack and validate:
-
-```bash
-./bootstrap.sh Build
-```
-
-## Common targets
-
-Run targets through the self-host entrypoint:
-
-```bash
-dotnet run --project ./build/build.fsproj -- <Target>
-```
-
-Common targets in this repository (`Library` spec):
+Common targets (`Library` spec):
 
 - `Build` (default when no target is provided)
 - `Lint`
@@ -69,43 +33,134 @@ Common targets in this repository (`Library` spec):
 - `Publish`
 - `Info`
 
-Useful arguments:
+Arguments:
 
 - `no-clean`: skips the `Clean` step.
-- `no-lint`: skips failing on lint errors.
-
-Example:
+- `no-lint`: skips the `Lint` step.
 
 ```bash
-dotnet run --project ./build/build.fsproj -- Build no-lint
+./build.sh Build no-lint
 ```
 
-## Tests
+## Prerequisites
 
-The `Tests` target runs both suites. To run one directly:
+- .NET SDK with `net10.0` support.
+- `bash`.
+- `git` (required by build metadata initialization).
+
+## Adoption
+
+Everything here is a manual copy — the engine is a normal NuGet package plus a handful of
+support files that live in the consuming repo.
+
+### 1. Pin the engine
+
+`paket.dependencies` at the repo root:
+
+```paket
+group Build
+    source https://api.nuget.org/v3/index.json
+
+    nuget Alma.Build 2.0.0
+```
+
+`build/paket.references`:
+
+```paket
+group Build
+    Alma.Build
+```
+
+`.config/dotnet-tools.json` — Paket is mandatory; `dotnet-fsharplint` backs the `Lint`
+target:
+
+```json
+{
+  "version": 1,
+  "isRoot": true,
+  "tools": {
+    "paket": { "version": "10.3.1", "commands": [ "paket" ] },
+    "dotnet-fsharplint": { "version": "0.26.10", "commands": [ "dotnet-fsharplint" ] }
+  }
+}
+```
+
+### 2. Add the build project
+
+`build/build.fsproj`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <IsPackable>false</IsPackable>
+        <NoWarn>NU1510</NoWarn>
+    </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="Build.fs" />
+    </ItemGroup>
+    <Import Project="..\.paket\Paket.Restore.targets" />
+</Project>
+```
+
+The `Paket.Restore.targets` import is what makes a plain `dotnet build`/`dotnet run`
+trigger Paket's restore, so no separate bootstrap step is needed once the files are in
+place.
+
+`build/Build.fs` is the only build file the repository owns and edits.
+
+### 3. Copy the support files
+
+They ship inside the package under `content/`, at
+`~/.nuget/packages/alma.build/<version>/content/` (or `$NUGET_PACKAGES`). Copy each to the
+repo root:
+
+| File               | Purpose                                                |
+| ------------------ | ------------------------------------------------------ |
+| `build.sh`         | entry point: restores tools + packages, runs the build |
+| `.editorconfig`    | formatting rules the engine's `Lint` target assumes    |
+| `fsharplint.json`  | lint configuration                                     |
+| `README.fbuild.md` | consumer-facing quick reference                        |
+
+`build.sh` needs to be executable:
 
 ```bash
-dotnet run --project tests/unit/unit.fsproj --
-dotnet run --project tests/integration/integration.fsproj --
+chmod +x build.sh
 ```
 
-The integration matrix is slow: each scenario copies a fixture from `tests/integration/fixtures/`
-to a temp directory and drives a full target graph through it, so it needs `npm` and the NuGet
-feeds. The copy is deleted when the scenario finishes; set `FBUILD_KEEP_TEMP` to keep it for
-inspection, at the cost of a full build tree per scenario left in `$TMPDIR`.
+These files are version-locked to the engine. Re-copy them whenever the pinned
+`Alma.Build` version changes — that is how engine-side changes to lint rules, formatting,
+or the entry point reach the repo.
+
+### 4. Restore and build
+
+`build.sh` restores tools and packages on every run, but its `paket restore` needs a
+`paket.lock` that does not exist yet. Generate it once:
 
 ```bash
-FBUILD_KEEP_TEMP=1 dotnet run --project tests/integration/integration.fsproj --
+dotnet tool restore
+dotnet paket install   # writes paket.lock — commit it
 ```
 
-## Versioning and releases
+From then on the entry point is enough:
 
-- `src/Alma.Build/Alma.Build.fsproj` carries the package `Version` and metadata.
-- `CHANGELOG.md` drives release metadata used by assembly info generation.
-- `Release` packs `src/Alma.Build` to `release/`.
+```bash
+./build.sh Build
+```
+
+## Updating
+
+1. Bump the version in `paket.dependencies`.
+2. `dotnet paket install`.
+3. Re-copy the support files from the new package's `content/` directory (step 3).
+4. If the engine's `Spec`/`Targets` surface changed, adjust `build/Build.fs` per the
+   release notes in `CHANGELOG.md`.
+5. Run `./build.sh` and commit `paket.lock` with the rest.
 
 ## Further reading
 
-- [`docs/vendoring.md`](docs/vendoring.md) — adopting the engine in a repository.
 - [`docs/specs/fbuild/spec.md`](docs/specs/fbuild/spec.md) — architecture and design reference.
 - `README.fbuild.md` — consumer-facing quick reference shipped with the engine.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — working on the engine itself.
