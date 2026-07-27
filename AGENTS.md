@@ -21,6 +21,7 @@ Prefer small diffs, clear validation, and no unrelated refactors.
 - Do not commit generated build outputs from `bin/`, `obj/`, or `release/` unless explicitly asked.
 - Keep public API changes intentional; if changing `Spec` or target behavior, align docs in the same change — consumers hand-edit their own `Build.fs`.
 - `vendored/.editorconfig`, `vendored/fsharplint.json`, `vendored/build.sh`, and `vendored/README.fbuild.md` are the support files and the single source packed into the engine package. Edit them there; the root entries are symlinks, not copies.
+- Every project that references the engine project takes FSharp.Core through its own `paket.references`, so `paket.lock` is the only place the version is written down. Never pin it as a literal `PackageReference` version — the pin has to equal what paket resolved for the engine, and a second copy of the number drifts silently into a runtime assembly-load failure. Where a literal is unavoidable, as in the consumer project the integration harness generates outside the repository, read it from `paket.lock` and bump it in the same change as the lock.
 - Preserve existing style in F# files.
 
 ## Build and test commands

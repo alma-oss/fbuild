@@ -64,6 +64,20 @@ let rec private copyInto (source: string) (target: string) =
         let name = Path.GetFileName dir
         if not (ignored.Contains name) then copyInto dir (Path.Combine (target, name))
 
+/// The version paket resolved for the engine. The generated project below sits outside the
+/// repository, so it cannot reach `paket.lock` through a `paket.references` of its own and has to
+/// carry the version literally — reading it here keeps the lock the only place it is written down.
+let private fsharpCoreVersion =
+    let lockFile = Path.Combine (root, "paket.lock")
+
+    // A resolved package sits at four spaces; the six-space lines under it are the version
+    // constraints its dependents asked for, which are ranges rather than a version.
+    File.ReadAllLines lockFile
+    |> Seq.tryPick (fun line ->
+        let matched = Text.RegularExpressions.Regex.Match (line, @"^ {4}FSharp\.Core \(([^)]+)\)")
+        if matched.Success then Some matched.Groups[1].Value else None)
+    |> Option.defaultWith (fun () -> failwith $"No resolved FSharp.Core version found in {lockFile}")
+
 /// A build project that references the engine from source and pins FSharp.Core to the engine's
 /// paket-resolved version — the SDK's implicit lower version would otherwise shadow it and the
 /// engine assembly would fail to load at runtime.
@@ -82,7 +96,7 @@ let private buildFsproj =
         <ProjectReference Include="{engineProject}" />
     </ItemGroup>
     <ItemGroup>
-        <PackageReference Include="FSharp.Core" Version="10.1.300" />
+        <PackageReference Include="FSharp.Core" Version="{fsharpCoreVersion}" />
     </ItemGroup>
 </Project>
 """

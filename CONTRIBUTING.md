@@ -28,6 +28,17 @@ preparation step:
 
 Engine edits take effect on the next run — there is nothing to repack.
 
+### FSharp.Core
+
+`build/`, `tests/unit/`, and `tests/integration/` reference the engine as a project, so they must
+resolve the same FSharp.Core the engine compiled against — an older one shadows it and the engine
+assembly fails to load at runtime. Each takes it through its own `paket.references`, which leaves
+`paket.lock` as the only place the version appears. Do not reintroduce a literal version pin.
+
+The consumer project the integration harness writes into a temp directory is the exception: it
+sits outside the repository and cannot resolve through Paket, so `Helpers.fs` reads the version
+out of `paket.lock` when generating it.
+
 ## Targets
 
 Run targets through the entry point:
