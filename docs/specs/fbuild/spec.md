@@ -17,10 +17,10 @@ repos; onboarding starts around 10).
 
 **Success looks like:**
 
-- A repo gets a working build by pinning one package and vendoring a small,
-  fixed set of support files.
+- A repo gets a working build by pinning one package and running the engine's
+  `Bootstrap` target, which deploys a small, fixed set of support files.
 - An existing repo pulls an engine improvement by bumping one version and
-  re-copying the vendored support files.
+  rerunning `Bootstrap`.
 - `Build.fs` is the only per-project build file an author owns and edits.
 - Breaking engine changes are visible and migratable, not silent.
 
@@ -28,7 +28,7 @@ repos; onboarding starts around 10).
 
 | Artifact | Source | Packaged as |
 | --- | --- | --- |
-| **`Alma.Build`** | `src/Alma.Build/` | NuGet library + packaged content assets |
+| **`Alma.Build`** | `src/Alma.Build/` | NuGet library; the support files are embedded resources in the assembly |
 
 Versioned off a single source of truth: `Version` in
 `src/Alma.Build/Alma.Build.fsproj`.
@@ -92,8 +92,11 @@ Consumer-repo command surface is one script:
 ### Target graph
 
 Targets are defined in `src/Alma.Build/Targets.fs`. Shared targets: `Info`,
-`Clean`, `AssemblyInfo`, `Build`, `Lint`, `Tests`, `Release`, `Publish`,
-`ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
+`Bootstrap`, `Clean`, `AssemblyInfo`, `Build`, `Lint`, `Tests`, `Release`,
+`Publish`, `ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
+
+`Bootstrap` sits outside every chain: run explicitly, it extracts the support
+files bundled in the engine assembly into the working directory (§5.4).
 
 | Spec | Chain |
 | --- | --- |
@@ -124,14 +127,13 @@ paket.lock              # authoritative version pin
 build.sh                # symlink to vendored/build.sh — also this repo's entry point
 fsharplint.json         # symlink to vendored/fsharplint.json
 .editorconfig           # symlink to vendored/.editorconfig
-README.fbuild.md        # symlink to vendored/README.fbuild.md
 
-vendored/               # VENDORED ASSETS — packed as content/, symlinked to the
-                        # root because this repo is its own first consumer
+vendored/               # VENDORED ASSETS — embedded into the engine assembly,
+                        # symlinked into the repo because it is its own first consumer
   build.sh              #   entry point: restores tools + packages, runs the build
   fsharplint.json       #   lint configuration
   .editorconfig         #   formatting rules the Lint target assumes
-  README.fbuild.md      #   consumer-facing quick reference
+  build/README.md       #   consumer-facing quick reference (deploys to build/)
 
 src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
   RtkFilter.fs          #   internal — per-command output filters (§5.5)
@@ -140,12 +142,13 @@ src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
   Utils.fs              #   ProjectDefinition / Spec / Git / RuntimeId model,
                         #   Args, Solution, Nuget, Http, Github helpers
   Targets.fs            #   the FAKE target graph for every project type
-  Alma.Build.fsproj     #   Version + metadata; packs the vendored files as content/
+  Alma.Build.fsproj     #   Version + metadata; embeds vendored/** as resources
   paket.references      #   FAKE dependencies (group Build)
 
 build/                  # SELF-HOST runner
   Build.fs              #   Library spec over src/Alma.Build
   build.fsproj          #   ProjectReference to src/Alma.Build
+  README.md             #   symlink to vendored/build/README.md
 
 tests/
   unit/                 # Expecto; reaches the internal modules via InternalsVisibleTo
@@ -167,14 +170,14 @@ Git-ignored: `bin/`, `obj/`, `release/`, `.paket/`, `packages/`, `paket-files/`,
 .config/dotnet-tools.json   # paket + dotnet-fsharplint
 paket.dependencies     # feed sources + group Build → Alma.Build <version>
 paket.lock             # pinned versions
-build.sh               # entry point (vendored)
-fsharplint.json        # vendored
-.editorconfig          # vendored
-README.fbuild.md       # vendored
+build.sh               # entry point (deployed by Bootstrap)
+fsharplint.json        # deployed by Bootstrap
+.editorconfig          # deployed by Bootstrap
 build/
   build.fsproj         # imports Paket.Restore.targets
   paket.references     # Alma.Build
   Build.fs             # author-owned
+  README.md            # deployed by Bootstrap
 src/ …                 # application code
 ```
 
@@ -185,11 +188,12 @@ Adoption steps are in `README.md`.
 ### 5.1 Distribution model
 
 The engine is a plain NuGet package; everything a repo needs beyond it is a
-small set of files committed to that repo. There is no bootstrapper: the
-repository author writes `paket.dependencies`, `build/paket.references`,
-`.config/dotnet-tools.json`, and a `build.fsproj` that imports
-`Paket.Restore.targets`, then copies the packaged assets to the repo root. From
-then on `build.sh` does the rest on every run:
+small set of files committed to that repo. The repository author writes
+`paket.dependencies`, `build/paket.references`, `.config/dotnet-tools.json`,
+and a `build.fsproj` that imports `Paket.Restore.targets`, then runs the
+engine's `Bootstrap` target
+(`dotnet run --project ./build/build.fsproj -- Bootstrap`), which deploys the
+support files. From then on `build.sh` does the rest on every run:
 
 ```bash
 dotnet tool restore
@@ -204,11 +208,11 @@ is mandatory across all build projects — there is no Paket-free variant.
 ### 5.2 Engine package — `Alma.Build`
 
 - Compiled engine (`RtkFilter.fs`, `Commands.fs`, `Utils.fs`, `Targets.fs`).
-- **Also ships the non-compiled assets** under `content/` (`build.sh`,
-  `README.fbuild.md`, `fsharplint.json`, `.editorconfig`). `IncludeContentInPack`
-  plus `NoDefaultExcludes` (so dotfiles pack). Consumers copy them out of the
-  restored package directory, which makes them **version-locked to the engine**:
-  a version bump is what delivers a new lint config or entry point.
+- **Also carries the non-compiled assets** as embedded resources — the fsproj
+  globs `vendored/**` with logical names that keep the relative path. The
+  `Bootstrap` target extracts them into the consuming repo, which makes them
+  **version-locked to the engine**: a version bump plus a `Bootstrap` run is
+  what delivers a new lint config or entry point.
 - Semver, single source: `Version` in `src/Alma.Build/Alma.Build.fsproj`.
 - Escape hatches: override targets from `Build.fs` via `Spec.map*`, or vendor
   the engine source outright.
@@ -235,15 +239,16 @@ ArmLinux | AlpineLinux | RaspberryPiHassioAddon | Other of string`.
 
 ### 5.4 Vendored support files
 
-`build.sh`, `README.fbuild.md`, `fsharplint.json`, and `.editorconfig` live in
-`vendored/`, ship in the package's `content/` directory, and are copied into the
-consuming repo root by hand. They are committed there, so a repo can diverge
-locally; the cost of diverging is that the next version bump has to be
-reconciled manually.
+`build.sh`, `fsharplint.json`, `.editorconfig`, and `build/README.md` live in
+`vendored/` and are embedded into the engine assembly with their directory
+structure. The `Bootstrap` target globs the bundled resources and writes each
+into the consuming repo at its relative path, overwriting what is there and
+marking `*.sh` executable. The files are committed to the consumer, so a repo
+can diverge locally; the cost of diverging is that the next `Bootstrap` run
+overwrites the local edit.
 
-This repository consumes them the same way, but through root symlinks instead of
-copies — the repo is its own first consumer, so the root and the packed payload
-cannot drift.
+This repository consumes them through symlinks instead of copies — the repo is
+its own first consumer, so the checkout and the bundled payload cannot drift.
 
 ### 5.5 Command execution and output filtering
 
@@ -287,12 +292,12 @@ returns exit code 1 on a failed build either way.
 
 ## 6. Workflows
 
-**New repo:** follow the adoption section in `README.md` — pin the package, add `build/`, copy
-the assets, `./build.sh`.
+**New repo:** follow the adoption section in `README.md` — pin the package, add `build/`, run
+`Bootstrap`, `./build.sh`.
 
 **Update (pull model — each repo on its own schedule):** bump the pin in
-`paket.dependencies` → `paket install` → re-copy the vendored assets from the
-new package → if the engine API changed, the author edits `Build.fs` per the
+`paket.dependencies` → `paket install` → `./build.sh Bootstrap` to redeploy the
+vendored assets → if the engine API changed, the author edits `Build.fs` per the
 release notes → CI runs the build → merge when green.
 
 **Override / fork:** override a target from `Build.fs` via `Spec.map*`, or
@@ -390,10 +395,11 @@ matrix exercises whatever is checked out with no repack step in between. Set
 
 **The packaging gate:** the `library, packaged engine` scenario. It packs the
 engine under a version nuget.org does not carry, installs it into a throwaway
-consumer through Paket, vendors the support files out of the package's own
-`content/`, and drives `Release` with the `build.sh` shipped inside the package.
+consumer through Paket, deploys the support files with the packaged engine's
+`Bootstrap` target, and drives `Release` through the `build.sh` it deployed —
+invoked directly, so the executable bit `Bootstrap` sets is asserted too.
 Every other scenario builds the engine from source, so the nuspec dependency set
-and the `content/` payload are covered only here. Its restores use a NuGet cache
+and the `Bootstrap` deployment are covered only here. Its restores use a NuGet cache
 inside the throwaway directory: the engine version does not move between packs,
 and a shared cache would hand back an earlier build of it.
 
@@ -419,18 +425,18 @@ artifacts exist rather than what is in them.
   not execute a single target.
 - Run the `library, packaged engine` scenario after changing packaging, the
   package `Version`, or the vendored assets.
-- Edit the vendored assets at the repo root; they are the single source packed
-  into the package.
+- Edit the vendored assets under `vendored/`; they are the single source
+  bundled into the engine assembly, and the repo's copies are symlinks to them.
 - Keep user-visible behavior changes in sync with `README.md`, `CONTRIBUTING.md`,
-  this document, and `README.fbuild.md`.
+  this document, and `build/README.md`.
 
 **Ask first:**
 
 - Breaking the `Spec` / `Targets` public surface — consumers hand-edit
   `Build.fs`, so it needs a major bump and a migration note.
 - Adding a dependency to the engine — it lands in every consuming repo.
-- Changing which files ship as packaged content — every consuming repo has to
-  re-copy or delete them by hand.
+- Changing which files `Bootstrap` deploys — a removed file lingers in every
+  consuming repo until deleted by hand.
 
 **Never:**
 
@@ -455,13 +461,11 @@ artifacts exist rather than what is in them.
 
 ## 11. Roadmap
 
-1. **Phase 0 (done)** — package the engine, self-host it, document vendoring,
-   cover every spec case with an end-to-end matrix.
+1. **Phase 0 (done)** — package the engine, self-host it, deploy the vendored
+   files through `Bootstrap`, cover every spec case with an end-to-end matrix.
 2. **Phase 1 (~10 repos)** — publish to a feed, onboard a few representative
    repos per project type, fix friction found on real code.
-3. **Phase 2** — automate adoption and updates so the vendored files are not
-   copied by hand.
-4. **Phase 3 (50–100 repos)** — Renovate for pull-based bumps, a migration
+3. **Phase 2 (50–100 repos)** — Renovate for pull-based bumps, a migration
    catalog, monitoring.
 
 ## 12. Open questions and risks
@@ -471,9 +475,10 @@ artifacts exist rather than what is in them.
   repository can resolve `Alma.Build` at all. Whether the production channel
   stays public nuget.org or moves to an internal feed, and the auth model if it
   moves, is unresolved.
-- **Manual vendoring has no drift detection.** Nothing records which version a
-  repo's `build.sh` or `fsharplint.json` came from, so a locally edited asset is
-  silently overwritten — or silently kept stale — on the next bump.
+- **Vendoring has no drift detection.** Nothing records which version a repo's
+  `build.sh` or `fsharplint.json` came from, and `Bootstrap` overwrites
+  unconditionally, so a locally edited asset is silently clobbered on the next
+  run — visible only in the repo's own diff.
 - **The matrix is nightly, not per-PR.** A target-graph regression lands green
   and is caught up to a day later, on a build nobody is watching.
 - **Filters are output-shape-coupled.** `RtkFilter` parses MSBuild, fsharplint

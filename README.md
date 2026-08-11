@@ -50,8 +50,9 @@ Arguments:
 
 ## Adoption
 
-Everything here is a manual copy — the engine is a normal NuGet package plus a handful of
-support files that live in the consuming repo.
+The engine is a normal NuGet package plus a handful of support files that live in the
+consuming repo; the engine's `Bootstrap` target deploys those files, so only the paket
+pin and the build project are written by hand.
 
 ### 1. Pin the engine
 
@@ -111,40 +112,38 @@ place.
 
 `build/Build.fs` is the only build file the repository owns and edits.
 
-### 3. Copy the support files
+### 3. Restore
 
-They ship inside the package under `content/`, at
-`~/.nuget/packages/alma.build/<version>/content/` (or `$NUGET_PACKAGES`). Copy each to the
-repo root:
-
-| File               | Purpose                                                |
-| ------------------ | ------------------------------------------------------ |
-| `build.sh`         | entry point: restores tools + packages, runs the build |
-| `.editorconfig`    | formatting rules the engine's `Lint` target assumes    |
-| `fsharplint.json`  | lint configuration                                     |
-| `README.fbuild.md` | consumer-facing quick reference                        |
-
-`build.sh` needs to be executable:
-
-```bash
-chmod +x build.sh
-```
-
-These files are version-locked to the engine. Re-copy them whenever the pinned
-`Alma.Build` version changes — that is how engine-side changes to lint rules, formatting,
-or the entry point reach the repo.
-
-### 4. Restore and build
-
-`build.sh` restores tools and packages on every run, but its `paket restore` needs a
-`paket.lock` that does not exist yet. Generate it once:
+Generate `paket.lock` once:
 
 ```bash
 dotnet tool restore
 dotnet paket install   # writes paket.lock — commit it
 ```
 
-From then on the entry point is enough:
+### 4. Bootstrap the support files
+
+The files are bundled inside the engine assembly; its `Bootstrap` target deploys them
+into the repo, preserving their directory structure:
+
+```bash
+dotnet run --project ./build/build.fsproj -- Bootstrap
+```
+
+| File              | Purpose                                                |
+| ----------------- | ------------------------------------------------------ |
+| `build.sh`        | entry point: restores tools + packages, runs the build |
+| `.editorconfig`   | formatting rules the engine's `Lint` target assumes    |
+| `fsharplint.json` | lint configuration                                     |
+| `build/README.md` | consumer-facing quick reference                        |
+
+`Bootstrap` overwrites existing copies and marks `build.sh` executable. The files are
+version-locked to the engine: rerunning `Bootstrap` after a version bump is how
+engine-side changes to lint rules, formatting, or the entry point reach the repo.
+
+### 5. Build
+
+From here on the entry point is enough:
 
 ```bash
 ./build.sh Build
@@ -154,7 +153,7 @@ From then on the entry point is enough:
 
 1. Bump the version in `paket.dependencies`.
 2. `dotnet paket install`.
-3. Re-copy the support files from the new package's `content/` directory (step 3).
+3. `./build.sh Bootstrap` to redeploy the support files.
 4. If the engine's `Spec`/`Targets` surface changed, adjust `build/Build.fs` per the
    release notes in `CHANGELOG.md`.
 5. Run `./build.sh` and commit `paket.lock` with the rest.
@@ -162,5 +161,5 @@ From then on the entry point is enough:
 ## Further reading
 
 - [`docs/specs/fbuild/spec.md`](docs/specs/fbuild/spec.md) — architecture and design reference.
-- `README.fbuild.md` — consumer-facing quick reference shipped with the engine.
+- `build/README.md` — consumer-facing quick reference shipped with the engine.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — working on the engine itself.

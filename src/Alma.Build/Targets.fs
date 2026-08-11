@@ -129,6 +129,38 @@ module Targets =
             separator "="
         )
 
+        // Deploys the support files bundled in the engine assembly, overwriting local copies —
+        // how a consumer first gets `build.sh` and how a version bump refreshes it.
+        Target.create "Bootstrap" (fun _ ->
+            let assembly = Reflection.Assembly.GetExecutingAssembly ()
+            let prefix = "vendored/"
+
+            assembly.GetManifestResourceNames ()
+            |> Seq.map (fun name -> name, name.Replace ('\\', '/'))
+            |> Seq.filter (snd >> String.startsWith prefix)
+            |> Seq.iter (fun (name, normalized) ->
+                let relative = normalized.Substring prefix.Length
+
+                match Path.getDirectory relative with
+                | "" -> ()
+                | dir -> Directory.ensure dir
+
+                use source = assembly.GetManifestResourceStream name
+                use target = IO.File.Create relative
+                source.CopyTo target
+
+                if relative.EndsWith ".sh" && not (OperatingSystem.IsWindows ()) then
+                    IO.File.SetUnixFileMode (
+                        target.SafeFileHandle,
+                        IO.UnixFileMode.UserRead ||| IO.UnixFileMode.UserWrite ||| IO.UnixFileMode.UserExecute
+                        ||| IO.UnixFileMode.GroupRead ||| IO.UnixFileMode.GroupExecute
+                        ||| IO.UnixFileMode.OtherRead ||| IO.UnixFileMode.OtherExecute
+                    )
+
+                Trace.tracefn " -> %s" relative
+            )
+        )
+
         Target.create "Clean" <| skipOn "no-clean" (fun _ ->
             !! "./**/bin/Release"
             ++ "./**/bin/Debug"

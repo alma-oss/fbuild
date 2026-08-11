@@ -182,21 +182,10 @@ let private packEngine (dir: string) (feed: string) =
 
     execOk root "dotnet" args
 
-/// The support files the engine ships as `content/`, which a consumer copies to its repo root.
-let private packagedAssets = [ "build.sh"; "README.fbuild.md"; "fsharplint.json"; ".editorconfig" ]
-
-let private packageContentDir (dir: string) (cache: string) =
-    [
-        Path.Combine (dir, "packages", "build", "Alma.Build", "content")
-        Path.Combine (cache, "alma.build", packagedVersion, "content")
-    ]
-    |> List.tryFind Directory.Exists
-    |> Option.defaultWith (fun () -> failwith $"Restored engine package carries no content/ directory in {dir}")
-
 /// Completes a fixture copy into a consumer that resolves the engine as a NuGet package, following
 /// the adoption steps in `README.md`: paket files pinning the engine, the consumer `build.fsproj`,
 /// `paket install` to write `paket.lock` and `.paket/Paket.Restore.targets`, and the support files
-/// vendored out of the package's own `content/` instead of this repo's root.
+/// deployed by the packaged engine's own `Bootstrap` target instead of copied from this repo.
 ///
 /// Restores run against a NuGet cache inside the throwaway directory. The engine version does not
 /// move between packs, so a cache shared with the machine would hand back an earlier build of it.
@@ -219,11 +208,7 @@ let private preparePackaged (fixture: string) =
     execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
     execWithOk env dir "dotnet" "tool restore"
     execWithOk env dir "dotnet" "tool run paket install"
-
-    let content = packageContentDir dir cache
-
-    for asset in packagedAssets do
-        File.Copy (Path.Combine (content, asset), Path.Combine (dir, asset), true)
+    execWithOk env dir "dotnet" "run --project build/build.fsproj -- Bootstrap"
 
     dir, env
 
@@ -234,14 +219,14 @@ let private cleanup (dir: string) =
     if keepTemp then printfn $"FBUILD_KEEP_TEMP set, kept fixture copy: {dir}"
     else Directory.Delete (dir, true)
 
-/// Runs `target` through the packaged engine's own vendored `build.sh`, then hands the consumer
-/// directory to `assertArtifacts`. `bash` runs the script directly because the copy out of the
-/// package does not carry its executable bit.
+/// Runs `target` through the `build.sh` the packaged engine's `Bootstrap` target deployed —
+/// invoked directly, so the executable bit Bootstrap sets is part of what is asserted — then
+/// hands the consumer directory to `assertArtifacts`.
 let withPackagedFixture (fixture: string) (target: string) (assertArtifacts: string -> unit) =
     let dir, env = preparePackaged fixture
 
     try
-        execWithOk env dir "bash" $"./build.sh {target}"
+        execWithOk env dir (Path.Combine (dir, "build.sh")) target
         assertArtifacts dir
     finally
         cleanup dir

@@ -6,7 +6,7 @@ updating — see [`README.md`](README.md).
 ## Repository layout
 
 - `src/Alma.Build/`: core build engine (`Targets`, `Spec`, helpers) and package targets.
-- `vendored/`: support files vendored into consuming repositories and packed into the engine package (`build.sh`, `README.fbuild.md`, `fsharplint.json`, `.editorconfig`). The repo root carries symlinks to them, because this repo is its own first consumer.
+- `vendored/`: support files bundled into the engine assembly as embedded resources and deployed into consuming repositories by the `Bootstrap` target (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`). The repo carries symlinks to them, because this repo is its own first consumer.
 - `build/`: self-host build entrypoint used to build this repo.
 - `docs/specs/fbuild/spec.md`: architecture and distribution design reference.
 
@@ -69,9 +69,9 @@ FBUILD_KEEP_TEMP=1 dotnet run --project tests/integration/integration.fsproj --
 ```
 
 The matrix runs each scenario against the engine built from source. One scenario instead packs
-the engine, installs it into a throwaway consumer through Paket, and drives the build with the
-`build.sh` shipped inside the package — that is what covers the nuspec dependencies and the
-`content/` payload before a release goes out.
+the engine, installs it into a throwaway consumer through Paket, deploys the support files with
+its `Bootstrap` target, and drives the build with the `build.sh` it deployed — that is what
+covers the nuspec dependencies and the bundled support files before a release goes out.
 
 ## When the engine will not build
 
@@ -99,4 +99,4 @@ When behavior changes, keep docs in sync in the same change:
 
 - consumer overview, targets, and adoption steps: `README.md`
 - spec, architecture, and distribution details: `docs/specs/fbuild/spec.md`
-- consumer quick reference: `README.fbuild.md`
+- consumer quick reference: `build/README.md`
