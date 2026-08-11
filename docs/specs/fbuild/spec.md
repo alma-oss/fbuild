@@ -44,11 +44,12 @@ Versioned off a single source of truth: `Version` in
 - **Paket `10.3.1`** — mandatory dependency manager for every build project;
   restored from `.config/dotnet-tools.json`.
 - **`dotnet-fsharplint 0.26.10`** — the `Lint` target.
-- **Expecto `10.2.1`** — both test suites (`tests/unit`, `tests/integration`).
-  The test projects use `PackageReference`, not Paket, and pin
-  `FSharp.Core 10.1.300` with `DisableImplicitFSharpCoreReference` so the SDK's
-  implicit lower version does not shadow the one the engine assembly was
-  compiled against.
+- **Expecto `10.2.1`** — both test suites (`tests/unit`, `tests/integration`),
+  referenced directly via `PackageReference`. `FSharp.Core` comes through Paket
+  (`paket.references`, group `Build`) in every project consuming the engine —
+  the self-host runner and both test projects — locked at `10.1.300`, with
+  `DisableImplicitFSharpCoreReference` so the SDK's implicit lower version does
+  not shadow the one the engine assembly was compiled against.
 - **bash** and **git** — required at build time (`build.sh`, and `Git.init`
   shells out to `git rev-parse`).
 - **Node/npm** — required by the SAFE-stack project type, and therefore by the
@@ -148,6 +149,7 @@ src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
 build/                  # SELF-HOST runner
   Build.fs              #   Library spec over src/Alma.Build
   build.fsproj          #   ProjectReference to src/Alma.Build
+  paket.references      #   FSharp.Core (group Build)
   README.md             #   symlink to vendored/build/README.md
 
 tests/
