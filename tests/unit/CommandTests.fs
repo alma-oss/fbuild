@@ -1,7 +1,7 @@
 module Alma.Build.Tests.CommandTests
 
 open Expecto
-open Alma.Build.Commands
+open Alma.Build.Command
 
 [<Tests>]
 let renderTests =

@@ -12,7 +12,7 @@ module Utils =
     open Fake.Core.TargetOperators
     open Fake.Tools.Git
 
-    open Commands
+    open Command
 
     [<RequireQualifiedAccess>]
     module Args =

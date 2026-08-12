@@ -3,7 +3,7 @@ namespace Alma.Build
 /// Typed build commands and the RTK-aware runners that execute them: FAKE trace compaction,
 /// the command vocabulary, RTK transport selection, serial and parallel runners, and the
 /// temp-log tee that keeps a failing run's suppressed output reachable.
-module internal Commands =
+module internal Command =
     open System
     open System.IO
 

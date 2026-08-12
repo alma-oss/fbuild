@@ -11,7 +11,7 @@ module Targets =
     open Fake.IO.Globbing.Operators
     open Fake.Core.TargetOperators
 
-    open Commands
+    open Command
     open Utils
     open Github.Types
 

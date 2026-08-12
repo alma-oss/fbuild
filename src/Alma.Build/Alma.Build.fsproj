@@ -22,7 +22,7 @@
 
     <ItemGroup>
         <Compile Include="RtkFilter.fs" />
-        <Compile Include="Commands.fs" />
+        <Compile Include="Command.fs" />
         <Compile Include="Utils.fs" />
         <Compile Include="Targets.fs" />
     </ItemGroup>
