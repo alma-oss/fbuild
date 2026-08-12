@@ -18,22 +18,25 @@ updating — see [`README.md`](README.md).
 
 ## Build this repository
 
-`build/build.fsproj` references `src/Alma.Build/Alma.Build.fsproj` as a project, so the
-self-host build always runs whatever engine source is checked out. A fresh clone needs no
-preparation step:
+Run the entry point from the repository root:
 
 ```bash
 ./build.sh
 ```
 
-Engine edits take effect on the next run — there is nothing to repack.
+`build.sh` restores the local tools and Paket packages — generating
+`.paket/Paket.Restore.targets`, which every project file imports — before building.
+
+`build/build.fsproj` references `src/Alma.Build/Alma.Build.fsproj` as a project, so engine
+edits take effect on the next run — there is nothing to repack.
 
 ### FSharp.Core
 
-`build/`, `tests/unit/`, and `tests/integration/` reference the engine as a project, so they must
-resolve the same FSharp.Core the engine compiled against — an older one shadows it and the engine
-assembly fails to load at runtime. Each takes it through its own `paket.references`, which leaves
-`paket.lock` as the only place the version appears. Do not reintroduce a literal version pin.
+Take FSharp.Core through `paket.references` in every project that references the engine
+(`build/`, `tests/unit/`, `tests/integration/`), leaving `paket.lock` as the only place the
+version appears. Do not add a literal version pin: these projects must resolve the same
+FSharp.Core the engine compiled against — an older one shadows it and the engine assembly
+fails to load at runtime.
 
 The consumer project the integration harness writes into a temp directory is the exception: it
 sits outside the repository and cannot resolve through Paket, so `Helpers.fs` reads the version
@@ -61,22 +64,27 @@ dotnet run --project tests/integration/integration.fsproj --
 
 The integration matrix is slow: each scenario copies a fixture from `tests/integration/fixtures/`
 to a temp directory and drives a full target graph through it, so it needs `npm` and the NuGet
-feeds. The copy is deleted when the scenario finishes; set `FBUILD_KEEP_TEMP` to keep it for
-inspection, at the cost of a full build tree per scenario left in `$TMPDIR`.
+feeds. Each copy is deleted when its scenario finishes; set `FBUILD_KEEP_TEMP` to keep it for
+inspection, at the cost of a full build tree per scenario left in `$TMPDIR`:
 
 ```bash
 FBUILD_KEEP_TEMP=1 dotnet run --project tests/integration/integration.fsproj --
 ```
 
-The matrix runs each scenario against the engine built from source. One scenario instead packs
-the engine, installs it into a throwaway consumer through Paket, deploys the support files with
-its `Bootstrap` target, and drives the build with the `build.sh` it deployed — that is what
-covers the nuspec dependencies and the bundled support files before a release goes out.
+Scenarios build the engine from source, except one that packs it, installs it into a throwaway
+consumer through Paket, deploys the support files with `Bootstrap`, and drives the build with
+the deployed `build.sh`. Run that one before a release goes out — the only coverage of the
+nuspec dependencies and the bundled support files:
+
+```bash
+dotnet run --project tests/integration/integration.fsproj -- --filter-test-case "library, packaged engine"
+```
 
 ## When the engine will not build
 
 The self-host build runs on the engine it is compiling, so engine source that does not compile
-takes `./build.sh` down with it. Nothing needed to recover goes through the engine:
+takes `./build.sh` down with it. Work on the engine with plain `dotnet` commands until it
+compiles again — none of them go through the engine:
 
 ```bash
 # only needed when .paket/Paket.Restore.targets is not yet generated (fresh clone)
@@ -88,13 +96,13 @@ dotnet fsharplint lint src/Alma.Build/Alma.Build.fsproj    # lint
 dotnet pack src/Alma.Build/Alma.Build.fsproj -c Release -o release   # release artifact
 ```
 
-`git stash` or `git revert` on the engine source restores a working `./build.sh` outright.
+To get a working `./build.sh` back immediately, `git stash` or `git revert` the engine source.
 
 ## Versioning and releases
 
-- `src/Alma.Build/Alma.Build.fsproj` carries the package `Version` and metadata.
-- `CHANGELOG.md` drives release metadata used by assembly info generation.
-- `Release` packs `src/Alma.Build` to `release/`.
+- Bump `Version` in `src/Alma.Build/Alma.Build.fsproj` and describe the change in
+  `CHANGELOG.md` — the changelog drives release metadata used by assembly info generation.
+- Run `./build.sh Release` to pack `src/Alma.Build` into `release/`.
 
 ## Documentation
 

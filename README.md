@@ -106,9 +106,8 @@ target:
 </Project>
 ```
 
-The `Paket.Restore.targets` import is what makes a plain `dotnet build`/`dotnet run`
-trigger Paket's restore, so no separate bootstrap step is needed once the files are in
-place.
+The `Paket.Restore.targets` import makes a plain `dotnet build`/`dotnet run` trigger
+Paket's restore.
 
 `build/Build.fs` is the only build file the repository owns and edits.
 

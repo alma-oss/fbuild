@@ -8,8 +8,6 @@ Make minimal, safe changes to the `Alma.Build` engine package while preserving b
 consuming repositories, which pin the engine package and deploy its support files with the
 `Bootstrap` target.
 
-Prefer small diffs, clear validation, and no unrelated refactors.
-
 ## Where to work
 
 - Engine: `src/Alma.Build/`
@@ -30,8 +28,7 @@ Prefer small diffs, clear validation, and no unrelated refactors.
 Use repository-root commands:
 
 ```bash
-# Default build target; the build project references the engine as a project, so engine
-# edits take effect on the next run
+# Default target; the engine is a project reference, so edits take effect on the next run
 ./build.sh
 
 # Unit tests only; the `Tests` target runs the integration matrix too.
