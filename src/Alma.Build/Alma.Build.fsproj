@@ -8,10 +8,17 @@
         <PackageId>Alma.Build</PackageId>
         <Version>2.0.0</Version>
         <Authors>Almacareer</Authors>
-        <Company>Almacareer</Company>
         <Description>FAKE + Paket build engine for F# projects.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/alma-oss/fbuild.git</RepositoryUrl>
+        <PackageProjectUrl>https://github.com/alma-oss/fbuild</PackageProjectUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
         <NoWarn>NU1510</NoWarn>
     </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    </ItemGroup>
 
     <ItemGroup>
         <Compile Include="RtkFilter.fs" />
