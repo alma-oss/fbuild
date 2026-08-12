@@ -23,7 +23,7 @@ self-host build always runs whatever engine source is checked out. A fresh clone
 preparation step:
 
 ```bash
-./build.sh Build
+./build.sh
 ```
 
 Engine edits take effect on the next run — there is nothing to repack.

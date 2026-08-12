@@ -32,7 +32,7 @@ Use repository-root commands:
 ```bash
 # Default build target; the build project references the engine as a project, so engine
 # edits take effect on the next run
-./build.sh Build
+./build.sh
 
 # Unit tests only; the `Tests` target runs the integration matrix too
 dotnet run --project tests/unit/unit.fsproj --
@@ -49,7 +49,7 @@ Target notes:
 After changes, run what is relevant:
 
 1. Engine or target logic changed:
-   - `./build.sh Build`
+   - `./build.sh`
 2. Packaging/versioning changed:
    - verify `src/Alma.Build/Alma.Build.fsproj` `Version` and `CHANGELOG.md` consistency.
    - run the packaged scenario, the only coverage of the package as a consumer receives it:

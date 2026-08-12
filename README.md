@@ -146,7 +146,7 @@ engine-side changes to lint rules, formatting, or the entry point reach the repo
 From here on the entry point is enough:
 
 ```bash
-./build.sh Build
+./build.sh
 ```
 
 ## Updating

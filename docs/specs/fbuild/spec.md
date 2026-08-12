@@ -449,7 +449,7 @@ artifacts exist rather than what is in them.
 
 ## 10. Success criteria
 
-- [x] `./build.sh Build` builds this repo from a fresh clone.
+- [x] `./build.sh` builds this repo from a fresh clone.
 - [x] The packaged engine is installed and driven end to end by an automated
       scenario.
 - [x] A repo following the adoption steps in `README.md` builds with `./build.sh`.
