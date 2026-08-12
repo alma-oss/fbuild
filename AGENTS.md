@@ -34,7 +34,8 @@ Use repository-root commands:
 # edits take effect on the next run
 ./build.sh
 
-# Unit tests only; the `Tests` target runs the integration matrix too
+# Unit tests only; the `Tests` target runs the integration matrix too.
+# Needs the generated .paket/Paket.Restore.targets — on a fresh clone run ./build.sh once first.
 dotnet run --project tests/unit/unit.fsproj --
 ```
 

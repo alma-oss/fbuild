@@ -79,6 +79,9 @@ The self-host build runs on the engine it is compiling, so engine source that do
 takes `./build.sh` down with it. Nothing needed to recover goes through the engine:
 
 ```bash
+# only needed when .paket/Paket.Restore.targets is not yet generated (fresh clone)
+dotnet tool restore && dotnet tool run paket restore
+
 dotnet build src/Alma.Build/Alma.Build.fsproj              # compile-fix loop
 dotnet run --project tests/unit/unit.fsproj --             # unit suite
 dotnet fsharplint lint src/Alma.Build/Alma.Build.fsproj    # lint
