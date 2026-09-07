@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Library</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <IsPackable>true</IsPackable>
+        <AssemblyName>Alma.Build</AssemblyName>
+        <PackageId>Alma.Build</PackageId>
+        <Version>2.0.0</Version>
+        <Authors>Almacareer</Authors>
+        <Description>FAKE + Paket build engine for F# projects.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/alma-oss/fbuild.git</RepositoryUrl>
+        <PackageProjectUrl>https://github.com/alma-oss/fbuild</PackageProjectUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <NoWarn>NU1510</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Compile Include="RtkFilter.fs" />
+        <Compile Include="Command.fs" />
+        <Compile Include="Utils.fs" />
+        <Compile Include="Targets.fs" />
+    </ItemGroup>
+
+    <!-- RtkFilter and Commands are internal; the unit test assembly reaches them here rather than
+         through the FAKE-only generated AssemblyInfo, which a plain `dotnet test` never produces. -->
+    <ItemGroup>
+        <InternalsVisibleTo Include="Alma.Build.Tests" />
+    </ItemGroup>
+
+    <!-- `bootstrap/` holds the support files; the repo carries symlinks to them because it is its
+         own first consumer. The glob targets the real files so nothing depends on how the checkout
+         materialised the links. The `Bootstrap` target extracts these resources into a consumer
+         repo, so the logical name must keep the relative path under `bootstrap/`. -->
+    <ItemGroup>
+        <EmbeddedResource Include="..\..\bootstrap\**\*">
+            <LogicalName>bootstrap/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+        </EmbeddedResource>
+    </ItemGroup>
+
+    <Import Project="..\..\.paket\Paket.Restore.targets" />
+</Project>
