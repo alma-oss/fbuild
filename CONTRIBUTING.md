@@ -6,7 +6,7 @@ updating — see [`README.md`](README.md).
 ## Repository layout
 
 - `src/Alma.Build/`: core build engine (`Targets`, `Spec`, helpers) and package targets.
-- `vendored/`: support files bundled into the engine assembly as embedded resources and deployed into consuming repositories by the `Bootstrap` target (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`). The repo carries symlinks to them, because this repo is its own first consumer.
+- `bootstrap/`: support files bundled into the engine assembly as embedded resources and deployed into consuming repositories by the `Bootstrap` target (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`). The repo carries symlinks to them, because this repo is its own first consumer.
 - `build/`: self-host build entrypoint used to build this repo.
 - `docs/specs/fbuild/spec.md`: architecture and distribution design reference.
 

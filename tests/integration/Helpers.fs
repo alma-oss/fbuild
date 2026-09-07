@@ -101,20 +101,20 @@ let private buildFsproj =
 </Project>
 """
 
-/// The engine packs these as `content/` and a consumer vendors them to its repo root. Taking them
-/// from `vendored/` — the same copy that gets packed — is what makes the matrix lint fixture
+/// The engine packs these as `content/` and `Bootstrap` deploys them to consumer repo roots. Taking them
+/// from `bootstrap/` — the same copy that gets packed — is what makes the matrix lint fixture
 /// sources under the real shipped ruleset instead of fsharplint's defaults.
-let private vendoredAssets = [ "fsharplint.json"; ".editorconfig" ]
+let private bootstrapAssets = [ "fsharplint.json"; ".editorconfig" ]
 
 /// Copies a checked-in fixture to a throwaway directory and completes it into a runnable consumer
-/// repo: the vendored assets, the `build.fsproj` carrying the absolute engine path, and a git repo,
+/// repo: the bootstrap assets, the `build.fsproj` carrying the absolute engine path, and a git repo,
 /// which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`.
 let private prepare (fixture: string) =
     let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-{fixture}-{Guid.NewGuid():N}")
     copyInto (Path.Combine (fixtures, fixture)) dir
 
-    for asset in vendoredAssets do
-        File.Copy (Path.Combine (root, "vendored", asset), Path.Combine (dir, asset), true)
+    for asset in bootstrapAssets do
+        File.Copy (Path.Combine (root, "bootstrap", asset), Path.Combine (dir, asset), true)
 
     File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), buildFsproj)
 

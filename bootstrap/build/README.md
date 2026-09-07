@@ -1,6 +1,6 @@
 # fbuild
 
-This repository uses the vendored Alma.Build build infrastructure.
+This repository uses the bootstrap Alma.Build build infrastructure.
 
 ## Entry point
 
@@ -11,9 +11,9 @@ This repository uses the vendored Alma.Build build infrastructure.
 - `no-clean` disables cleaning directories in the first step. This is useful on CI when intermediate outputs need to remain available.
 - `no-lint` skips the `Lint` step entirely.
 
-## Updating vendored files
+## Updating bootstrap files
 
-`build.sh`, this README, and the other vendored support files are bundled inside the pinned `Alma.Build` package. After bumping the pinned version, run the `Bootstrap` target to redeploy them:
+`build.sh`, this README, and the other bootstrap support files are bundled inside the pinned `Alma.Build` package. After bumping the pinned version, run the `Bootstrap` target to redeploy them:
 
 ```bash
 ./build.sh Bootstrap

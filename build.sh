@@ -1,1 +1,1 @@
-vendored/build.sh
+bootstrap/build.sh

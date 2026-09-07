@@ -18,7 +18,7 @@ A consuming repository owns a single build file, `build/Build.fs`, which declare
 - `ConsoleApplication`
 - `SAFEStackApplication`
 
-Targets are then run through the vendored entry point:
+Targets are then run through the bootstrap entry point:
 
 ```bash
 ./build.sh <Target>

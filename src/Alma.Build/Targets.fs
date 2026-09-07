@@ -133,7 +133,7 @@ module Targets =
         // how a consumer first gets `build.sh` and how a version bump refreshes it.
         Target.create "Bootstrap" (fun _ ->
             let assembly = Reflection.Assembly.GetExecutingAssembly ()
-            let prefix = "vendored/"
+            let prefix = "bootstrap/"
 
             assembly.GetManifestResourceNames ()
             |> Seq.map (fun name -> name, name.Replace ('\\', '/'))

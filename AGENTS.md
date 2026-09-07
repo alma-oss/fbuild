@@ -12,14 +12,14 @@ consuming repositories, which pin the engine package and deploy its support file
 
 - Engine: `src/Alma.Build/`
 - Self-host entrypoint: `build/Build.fs`
-- Vendored consumer assets: `vendored/` (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`), symlinked into the repo
+- Bootstrap assets: `bootstrap/` (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`), symlinked into the repo
 
 ## Ground rules
 
-- Do not edit vendored package contents in `packages/`.
+- Do not edit package contents in `packages/`.
 - Do not commit generated build outputs from `bin/`, `obj/`, or `release/` unless explicitly asked.
 - Keep public API changes intentional; if changing `Spec` or target behavior, align docs in the same change — consumers hand-edit their own `Build.fs`.
-- `vendored/.editorconfig`, `vendored/fsharplint.json`, `vendored/build.sh`, and `vendored/build/README.md` are the support files and the single source bundled into the engine assembly. Edit them there; the repo entries are symlinks, not copies.
+- `bootstrap/.editorconfig`, `bootstrap/fsharplint.json`, `bootstrap/build.sh`, and `bootstrap/build/README.md` are the support files and the single source bundled into the engine assembly. Edit them there; the repo entries are symlinks, not copies.
 - Every project that references the engine project takes FSharp.Core through its own `paket.references`, so `paket.lock` is the only place the version is written down. Never pin it as a literal `PackageReference` version — the pin has to equal what paket resolved for the engine, and a second copy of the number drifts silently into a runtime assembly-load failure. Where a literal is unavoidable, as in the consumer project the integration harness generates outside the repository, read it from `paket.lock` and bump it in the same change as the lock.
 - Preserve existing style in F# files.
 
@@ -60,8 +60,8 @@ If a project/package was renamed and pack/restore behaves oddly, clear stale art
 - Add a target behavior:
   - update `src/Alma.Build/Targets.fs`
   - update docs (`README.md`, `CONTRIBUTING.md`, `docs/specs/fbuild/spec.md`) if behavior is user-visible
-- Change a vendored asset:
-  - update the file in `vendored/` (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`) and note it in `CHANGELOG.md` — consumers rerun `Bootstrap` on a version bump
+- Change a bootstrap asset:
+  - update the file in `bootstrap/` (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`) and note it in `CHANGELOG.md` — consumers rerun `Bootstrap` on a version bump
 
 ## Documentation expectations
 
@@ -70,7 +70,7 @@ When behavior changes, keep docs in sync in the same PR:
 - consumer overview, targets, and adoption steps: `README.md`
 - development workflow and commands: `CONTRIBUTING.md`
 - spec, architecture, and distribution details: `docs/specs/fbuild/spec.md`
-- consumer quick reference: `build/README.md` (source: `vendored/build/README.md`)
+- consumer quick reference: `build/README.md` (source: `bootstrap/build/README.md`)
 
 ## SDD artifacts
 

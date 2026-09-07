@@ -125,11 +125,11 @@ CONTRIBUTING.md         # working on the engine itself
 fbuild.slnx             # solution: src/Alma.Build, build, both test projects
 paket.dependencies      # group Build → the engine's own FAKE dependencies
 paket.lock              # authoritative version pin
-build.sh                # symlink to vendored/build.sh — also this repo's entry point
-fsharplint.json         # symlink to vendored/fsharplint.json
-.editorconfig           # symlink to vendored/.editorconfig
+build.sh                # symlink to bootstrap/build.sh — also this repo's entry point
+fsharplint.json         # symlink to bootstrap/fsharplint.json
+.editorconfig           # symlink to bootstrap/.editorconfig
 
-vendored/               # VENDORED ASSETS — embedded into the engine assembly,
+bootstrap/              # BOOTSTRAP ASSETS — embedded into the engine assembly,
                         # symlinked into the repo because it is its own first consumer
   build.sh              #   entry point: restores tools + packages, runs the build
   fsharplint.json       #   lint configuration
@@ -143,14 +143,14 @@ src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
   Utils.fs              #   ProjectDefinition / Spec / Git / RuntimeId model,
                         #   Args, Solution, Nuget, Http, Github helpers
   Targets.fs            #   the FAKE target graph for every project type
-  Alma.Build.fsproj     #   Version + metadata; embeds vendored/** as resources
+  Alma.Build.fsproj     #   Version + metadata; embeds bootstrap/** as resources
   paket.references      #   FAKE dependencies (group Build)
 
 build/                  # SELF-HOST runner
   Build.fs              #   Library spec over src/Alma.Build
   build.fsproj          #   ProjectReference to src/Alma.Build
   paket.references      #   FSharp.Core (group Build)
-  README.md             #   symlink to vendored/build/README.md
+  README.md             #   symlink to bootstrap/build/README.md
 
 tests/
   unit/                 # Expecto; reaches the internal modules via InternalsVisibleTo
@@ -211,7 +211,7 @@ is mandatory across all build projects — there is no Paket-free variant.
 
 - Compiled engine (`RtkFilter.fs`, `Commands.fs`, `Utils.fs`, `Targets.fs`).
 - **Also carries the non-compiled assets** as embedded resources — the fsproj
-  globs `vendored/**` with logical names that keep the relative path. The
+  globs `bootstrap/**` with logical names that keep the relative path. The
   `Bootstrap` target extracts them into the consuming repo, which makes them
   **version-locked to the engine**: a version bump plus a `Bootstrap` run is
   what delivers a new lint config or entry point.
@@ -239,10 +239,10 @@ each has a `Spec.map*` function for overriding fields from `Build.fs`.
 envVarName` drives the `Publish` target. `RuntimeId = OSX | Windows | Linux |
 ArmLinux | AlpineLinux | RaspberryPiHassioAddon | Other of string`.
 
-### 5.4 Vendored support files
+### 5.4 Bootstrap support files
 
 `build.sh`, `fsharplint.json`, `.editorconfig`, and `build/README.md` live in
-`vendored/` and are embedded into the engine assembly with their directory
+`bootstrap/` and are embedded into the engine assembly with their directory
 structure. The `Bootstrap` target globs the bundled resources and writes each
 into the consuming repo at its relative path, overwriting what is there and
 marking `*.sh` executable. The files are committed to the consumer, so a repo
@@ -299,7 +299,7 @@ returns exit code 1 on a failed build either way.
 
 **Update (pull model — each repo on its own schedule):** bump the pin in
 `paket.dependencies` → `paket install` → `./build.sh Bootstrap` to redeploy the
-vendored assets → if the engine API changed, the author edits `Build.fs` per the
+bootstrap assets → if the engine API changed, the author edits `Build.fs` per the
 release notes → CI runs the build → merge when green.
 
 **Override / fork:** override a target from `Build.fs` via `Spec.map*`, or
@@ -379,7 +379,7 @@ selection, tee decision and trace compaction (`CommandTests`), and the small
 **Integration — `tests/integration/`.** One scenario per `ProjectSpec` case.
 Each copies the checked-in fixture repo for that case out of
 `tests/integration/fixtures/` into a throwaway directory, completes it into a
-runnable consumer repo (vendored `fsharplint.json` + `.editorconfig` taken from
+runnable consumer repo (bootstrap `fsharplint.json` + `.editorconfig` taken from
 this repo's root, a generated `build.fsproj`, `git init`), drives its terminal
 release target through the engine's own entry point, and asserts the artifacts:
 
@@ -426,8 +426,8 @@ artifacts exist rather than what is in them.
 - Run the integration matrix after changing `Targets.fs` — the unit suite does
   not execute a single target.
 - Run the `library, packaged engine` scenario after changing packaging, the
-  package `Version`, or the vendored assets.
-- Edit the vendored assets under `vendored/`; they are the single source
+  package `Version`, or the bootstrap assets.
+- Edit the bootstrap assets under `bootstrap/`; they are the single source
   bundled into the engine assembly, and the repo's copies are symlinks to them.
 - Keep user-visible behavior changes in sync with `README.md`, `CONTRIBUTING.md`,
   this document, and `build/README.md`.
@@ -442,7 +442,7 @@ artifacts exist rather than what is in them.
 
 **Never:**
 
-- Edit vendored contents under `packages/`, `paket-files/`, or `.paket/`.
+- Edit bootstrap contents under `packages/`, `paket-files/`, or `.paket/`.
 - Commit `bin/`, `obj/`, `release/`, or generated `AssemblyInfo.fs`.
 - Commit real feed credentials or API keys — pushes read
   `PRIVATE_FEED_PASS` / a named env var at build time.
@@ -463,7 +463,7 @@ artifacts exist rather than what is in them.
 
 ## 11. Roadmap
 
-1. **Phase 0 (done)** — package the engine, self-host it, deploy the vendored
+1. **Phase 0 (done)** — package the engine, self-host it, deploy the bootstrap
    files through `Bootstrap`, cover every spec case with an end-to-end matrix.
 2. **Phase 1 (~10 repos)** — publish to a feed, onboard a few representative
    repos per project type, fix friction found on real code.

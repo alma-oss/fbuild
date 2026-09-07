@@ -33,13 +33,13 @@
         <InternalsVisibleTo Include="Alma.Build.Tests" />
     </ItemGroup>
 
-    <!-- `vendored/` holds the support files; the repo carries symlinks to them because it is its
+    <!-- `bootstrap/` holds the support files; the repo carries symlinks to them because it is its
          own first consumer. The glob targets the real files so nothing depends on how the checkout
          materialised the links. The `Bootstrap` target extracts these resources into a consumer
-         repo, so the logical name must keep the relative path under `vendored/`. -->
+         repo, so the logical name must keep the relative path under `bootstrap/`. -->
     <ItemGroup>
-        <EmbeddedResource Include="..\..\vendored\**\*">
-            <LogicalName>vendored/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+        <EmbeddedResource Include="..\..\bootstrap\**\*">
+            <LogicalName>bootstrap/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
         </EmbeddedResource>
     </ItemGroup>
 

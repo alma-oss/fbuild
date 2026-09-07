@@ -1,1 +1,1 @@
-../vendored/build/README.md
+../bootstrap/build/README.md
