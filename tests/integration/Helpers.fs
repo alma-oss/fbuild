@@ -106,13 +106,13 @@ let private buildFsproj =
 /// sources under the real shipped ruleset instead of fsharplint's defaults.
 let private bootstrapAssets = [ "fsharplint.json"; ".editorconfig" ]
 
+let private toolRestoreLock = obj ()
+
 /// Copies a checked-in fixture to a throwaway directory and completes it into a runnable consumer
 /// repo: the bootstrap assets, the `build.fsproj` carrying the absolute engine path, and a git repo,
 /// which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`.
 let private prepare (fixture: string) =
     let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-{fixture}-{Guid.NewGuid():N}")
-    let cache = Path.Combine (dir, "nuget-cache")
-    let env = [ "NUGET_PACKAGES", cache ]
     copyInto (Path.Combine (fixtures, fixture)) dir
 
     for asset in bootstrapAssets do
@@ -122,7 +122,7 @@ let private prepare (fixture: string) =
 
     execOk dir "git" "init"
     execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
-    execWithOk env dir "dotnet" "tool restore"
+    lock toolRestoreLock (fun () -> execOk dir "dotnet" "tool restore")
 
     dir
 
