@@ -111,6 +111,8 @@ let private bootstrapAssets = [ "fsharplint.json"; ".editorconfig" ]
 /// which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`.
 let private prepare (fixture: string) =
     let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-{fixture}-{Guid.NewGuid():N}")
+    let cache = Path.Combine (dir, "nuget-cache")
+    let env = [ "NUGET_PACKAGES", cache ]
     copyInto (Path.Combine (fixtures, fixture)) dir
 
     for asset in bootstrapAssets do
@@ -120,7 +122,7 @@ let private prepare (fixture: string) =
 
     execOk dir "git" "init"
     execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
-    execOk dir "dotnet" "tool restore"
+    execWithOk env dir "dotnet" "tool restore"
 
     dir
 
