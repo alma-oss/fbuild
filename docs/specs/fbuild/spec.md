@@ -53,7 +53,7 @@ Versioned off a single source of truth: `Version` in
 - **bash** and **git** — required at build time (`build.sh`, and `Git.init`
   shells out to `git rev-parse`).
 - **Node/npm** — required by the SAFE-stack project type, and therefore by the
-  integration matrix's `safe` fixture.
+  integration tests' `safe` fixture.
 - **RTK** (optional) — when `RTK_ACTIVE` is set the engine routes commands
   through `rtk` and compacts their output; see §5.5. Absent, output is
   byte-identical to a direct spawn.
@@ -140,7 +140,7 @@ src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
   RtkFilter.fs          #   internal — per-command output filters (§5.5)
   Commands.fs           #   internal — command vocabulary, RTK transport,
                         #   serial + parallel runners, failure-log tee
-  Utils.fs              #   ProjectDefinition / Spec / Git / RuntimeId model,
+  Utils.fs              #   ProjectDefinition / Spec / Git / RuntimeTarget model,
                         #   Args, Solution, Nuget, Http, Github helpers
   Targets.fs            #   the FAKE target graph for every project type
   Alma.Build.fsproj     #   Version + metadata; embeds bootstrap/** as resources
@@ -229,15 +229,28 @@ is mandatory across all build projects — there is no Paket-free variant.
 | --- | --- | --- |
 | `Library` | `Spec.defaultLibrary` | `ReleaseDir`, `NugetApi`, `Organization`, `NugetCustomServerRepository` |
 | `Executable` | `Spec.defaultExecutable` | `ReleaseDir = ./app` |
-| `ConsoleApplication` | `Spec.defaultConsoleApplication runtimeIds` | `RuntimeIds`, `ReleaseSource`, `ReleaseDir = ./dist` |
+| `ConsoleApplication` | `Spec.defaultConsoleApplication runtimeTargets` | `RuntimeTargets`, `RuntimeMode = Portable`, `PublishSingleFile = true`, `ReleaseSource`, `ReleaseDir = ./dist` |
 | `SAFEStackApplication` | `Spec.defaultSAFEStackApplication templateVersion` | Shared/Server/Client + test paths, `DeployPath` |
 
 Every case implements `IProjectSources` (`Sources` / `Tests` / `All` globs) and
 each has a `Spec.map*` function for overriding fields from `Build.fs`.
 
 `NugetApi = NotUsed | AskForKey | Organization of name | KeyInEnvironment of
-envVarName` drives the `Publish` target. `RuntimeId = OSX | Windows | Linux |
-ArmLinux | AlpineLinux | RaspberryPiHassioAddon | Other of string`.
+envVarName` drives the `Publish` target. The consumer-facing `RuntimeTarget` is
+`OSX | OSXArm64 | Windows | Linux | ArmLinux | AlpineLinux |
+RaspberryPiHassioAddon | Custom of string`. The engine resolves targets to its internal
+`RuntimeIdentifier` string wrapper before comparison or command construction.
+
+`ConsoleApplication.RuntimeMode` controls the runtime supplied to local `Build`, `Tests`,
+`Run`, and `Watch` targets, including their Mirrord variants: `Portable` supplies none,
+`AutoDetect` uses the RID reported by the running .NET runtime, and `Specific runtimeTarget`
+supplies the given target. Both `AutoDetect` and `Specific` must resolve to a RID listed in
+`RuntimeTargets`, or resolution fails with `UnsupportedRuntime`; only `Portable` skips this
+check. `ProjectSpec.RuntimeConfiguration` exposes this capability
+without making target initialization depend on a particular project-spec case. `Release`
+publishes every `RuntimeTargets` entry in parallel, each into its own intermediate directory
+so the targets do not overwrite one another's `obj/project.assets.json`. `PublishSingleFile`
+controls the `PublishSingleFile` MSBuild property for those self-contained releases.
 
 ### 5.4 Bootstrap support files
 
@@ -348,7 +361,7 @@ let defaultLibrary: ProjectSpec =
 Conventions in force:
 
 - `[<RequireQualifiedAccess>]` on helper modules (`Args`, `Option`, `Solution`,
-  `Nuget`, `Spec`, `Git`, `RuntimeId`, `NugetApi`, `Http`, `Github`,
+  `Nuget`, `Spec`, `Git`, `RuntimeTarget`, `NugetApi`, `Http`, `Github`,
   `Command`, `Rtk`, `CompactTrace`, `Filter`, `JobName`, `ExitCode`,
   `CapturedOutput`).
 - Companion `default*` / `map*` pairs per spec case; adding a case means adding
@@ -368,34 +381,36 @@ Conventions in force:
 ## 8. Testing strategy
 
 Two Expecto suites, both run by the `Tests` target (this repo's `TestsSources`
-is `tests/*/*.fsproj` — one level only, so the matrix's fixture projects are
+is `tests/*/*.fsproj` — one level only, so integration fixture projects are
 not mistaken for tests).
 
 **Unit — `tests/unit/`.** Covers the pure parts the rest of the engine is built
 on: the output filters (`RtkFilterTests`), the command vocabulary, transport
-selection, tee decision and trace compaction (`CommandTests`), and the small
-`Utils` helpers (`UtilsTests`). Fast, spawns no processes.
+selection, tee decision and trace compaction (`CommandTests`), runtime resolution
+(`UtilsTests`), and runtime command construction (`TargetsTests`). Fast, spawns no
+processes.
 
-**Integration — `tests/integration/`.** One scenario per `ProjectSpec` case.
-Each copies the checked-in fixture repo for that case out of
+**Integration — `tests/integration/`.** One or more independent cases exercise each
+`ProjectSpec` shape. Each case copies its checked-in fixture repo out of
 `tests/integration/fixtures/` into a throwaway directory, completes it into a
 runnable consumer repo (bootstrap `fsharplint.json` + `.editorconfig` taken from
-this repo's root, a generated `build.fsproj`, `git init`), drives its terminal
-release target through the engine's own entry point, and asserts the artifacts:
+this repo's root, a generated `build.fsproj`, `git init`), drives the requested target
+through the engine's own entry point, and asserts its behavior. Generated project references
+give every fixture copy isolated engine `bin`/`obj` paths, so cases can run concurrently:
 
 | Fixture | Target | Asserted |
 | --- | --- | --- |
 | `library` | `Release` | a `.nupkg` in `release/` |
 | `executable` | `Release` | `app/test.executable.dll` |
-| `console` | `Release` | `dist/linux-x64.zip` |
+| `console` | `Release` | Linux x64 and macOS x64/arm64 archives, each holding the single-file executable |
 | `safe` | `Bundle` | a server `.dll` in `deploy/`, an `.html` in `deploy/public/` |
 
 Landing on the terminal target pulls the whole chain (`AssemblyInfo`, `Build`,
 `Lint`, `Tests`) with it. Fixtures reference the engine **from source**, so the
-matrix exercises whatever is checked out with no repack step in between. Set
+integration tests exercise whatever is checked out with no repack step in between. Set
 `FBUILD_KEEP_TEMP` to keep a scenario's directory for inspection.
 
-**The packaging gate:** the `library, packaged engine` scenario. It packs the
+**The packaging gate:** the `should release a library through the packaged engine` case. It packs the
 engine under a version nuget.org does not carry, installs it into a throwaway
 consumer through Paket, deploys the support files with the packaged engine's
 `Bootstrap` target, and drives `Release` through the `build.sh` it deployed —
@@ -408,14 +423,14 @@ and a shared cache would hand back an earlier build of it.
 **CI** (`.github/workflows/`):
 
 - `tests.yaml` — on a pull request, `./build.sh -t Lint` plus the unit suite.
-  The matrix is minutes of work and needs npm and the NuGet feeds, so it runs on
+  Integration tests take minutes and need npm and the NuGet feeds, so they run on
   a nightly cron instead, as `./build.sh -t Tests`.
 - `pr-check.yaml` — blocks fixup commits, runs ShellCheck.
 - `publish.yaml` — on a `X.Y.Z` tag, `./build.sh -t publish` with
   `NUGET_API_KEY` in the environment.
 
-**Coverage gap:** the matrix runs on `ubuntu-latest` only, and asserts that
-artifacts exist rather than what is in them.
+**Coverage gap:** CI runs integration tests on `ubuntu-latest` only. Console tests
+cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 
 ## 9. Boundaries
 
@@ -423,9 +438,9 @@ artifacts exist rather than what is in them.
 
 - Keep `Alma.Build.fsproj` `Version`, `CHANGELOG.md`, and
   `paket.dependencies` consistent in the same change.
-- Run the integration matrix after changing `Targets.fs` — the unit suite does
+- Run the integration tests after changing `Targets.fs` — the unit suite does
   not execute a single target.
-- Run the `library, packaged engine` scenario after changing packaging, the
+- Run the `packaged engine` filtered case after changing packaging, the
   package `Version`, or the bootstrap assets.
 - Edit the bootstrap assets under `bootstrap/`; they are the single source
   bundled into the engine assembly, and the repo's copies are symlinks to them.
@@ -454,7 +469,7 @@ artifacts exist rather than what is in them.
       scenario.
 - [x] A repo following the adoption steps in `README.md` builds with `./build.sh`.
 - [x] Every spec case is covered by an automated end-to-end check — the nightly
-      integration matrix.
+      integration tests.
 - [ ] A feed consuming repos can resolve `Alma.Build` from is wired up and
       reachable from CI and dev machines.
 - [ ] `Publish` has been exercised against that feed. The self-host build is
@@ -464,7 +479,7 @@ artifacts exist rather than what is in them.
 ## 11. Roadmap
 
 1. **Phase 0 (done)** — package the engine, self-host it, deploy the bootstrap
-   files through `Bootstrap`, cover every spec case with an end-to-end matrix.
+   files through `Bootstrap`, cover every spec case with end-to-end integration tests.
 2. **Phase 1 (~10 repos)** — publish to a feed, onboard a few representative
    repos per project type, fix friction found on real code.
 3. **Phase 2 (50–100 repos)** — Renovate for pull-based bumps, a migration
@@ -481,7 +496,7 @@ artifacts exist rather than what is in them.
   `build.sh` or `fsharplint.json` came from, and `Bootstrap` overwrites
   unconditionally, so a locally edited asset is silently clobbered on the next
   run — visible only in the repo's own diff.
-- **The matrix is nightly, not per-PR.** A target-graph regression lands green
+- **Integration tests are nightly, not per-PR.** A target-graph regression lands green
   and is caught up to a day later, on a build nobody is watching.
 - **Filters are output-shape-coupled.** `RtkFilter` parses MSBuild, fsharplint
   and Fable output by regex, so a tool changing its formatting degrades the

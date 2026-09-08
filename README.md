@@ -148,6 +148,33 @@ From here on the entry point is enough:
 ./build.sh
 ```
 
+### Console application runtime settings
+
+`Spec.defaultConsoleApplication` defaults to portable `Build`, `Run`, and `Watch`
+targets and publishes one self-contained single-file artifact per supplied runtime target.
+Use `Spec.mapConsoleApplication` when the local build should target a runtime or when
+the release should keep its files unbundled:
+
+```fsharp
+Specs =
+    Spec.defaultConsoleApplication [ Linux; Windows ]
+    |> Spec.mapConsoleApplication (fun spec ->
+        { spec with
+            RuntimeMode = RuntimeMode.AutoDetect
+            PublishSingleFile = false
+        }
+    )
+```
+
+`RuntimeMode.AutoDetect` selects the RID reported by the running .NET runtime;
+`RuntimeMode.Specific runtimeTarget` selects the given target. Both pass the resolved RID
+as `-r <runtimeIdentifier>` to `Build`, `Tests`, `Run`, and `Watch`, including their
+Mirrord variants. A `Specific` target must occur in `RuntimeTargets`; `AutoDetect` is
+independent of the release matrix. `Release` always publishes every target in
+`RuntimeTargets`; `PublishSingleFile = false` keeps the published files separate.
+
+Use `Custom "linux-musl-arm64"` for a RID without a predefined `RuntimeTarget` case.
+
 ## Updating
 
 1. Bump the version in `paket.dependencies`.

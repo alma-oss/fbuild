@@ -31,7 +31,7 @@ Use repository-root commands:
 # Default target; the engine is a project reference, so edits take effect on the next run
 ./build.sh
 
-# Unit tests only; the `Tests` target runs the integration matrix too.
+# Unit tests only; the `Tests` target runs the integration tests too.
 # Needs the generated .paket/Paket.Restore.targets — on a fresh clone run ./build.sh once first.
 dotnet run --project tests/unit/unit.fsproj --
 ```
@@ -40,7 +40,7 @@ Target notes:
 
 - Default target is `Build`.
 - Main `Library` flow is: `Clean -> AssemblyInfo -> Build -> Lint -> Tests -> Release -> Publish`.
-- The integration matrix drives a full target graph per fixture, so it takes minutes and needs `npm` and the NuGet feeds. It deletes its temp fixture copy per scenario; run with `FBUILD_KEEP_TEMP=1` to keep the copies when debugging a failure.
+- The integration tests drive full target graphs through fixtures, so they take minutes and need `npm` and the NuGet feeds. Each test deletes its fixture copy; run with `FBUILD_KEEP_TEMP=1` to keep the copies when debugging a failure.
 
 ## Validation checklist
 
@@ -51,7 +51,7 @@ After changes, run what is relevant:
 2. Packaging/versioning changed:
    - verify `src/Alma.Build/Alma.Build.fsproj` `Version` and `CHANGELOG.md` consistency.
    - run the packaged scenario, the only coverage of the package as a consumer receives it:
-     `dotnet run --project tests/integration/integration.fsproj -- --filter-test-case "library, packaged engine"`
+     `dotnet run --project tests/integration/integration.fsproj -- --filter-test-case "packaged engine"`
 
 If a project/package was renamed and pack/restore behaves oddly, clear stale artifacts in the renamed project `obj/` and `bin/` before re-running validation.
 
@@ -67,10 +67,10 @@ If a project/package was renamed and pack/restore behaves oddly, clear stale art
 
 When behavior changes, keep docs in sync in the same PR:
 
-- consumer overview, targets, and adoption steps: `README.md`
-- development workflow and commands: `CONTRIBUTING.md`
-- spec, architecture, and distribution details: `docs/specs/fbuild/spec.md`
-- consumer quick reference: `build/README.md` (source: `bootstrap/build/README.md`)
+- `README.md`: consumer overview, adoption steps, and configuration examples authors need in `build/Build.fs`.
+- `CONTRIBUTING.md`: engine-maintainer workflow, validation commands, and repository conventions.
+- `docs/specs/fbuild/spec.md`: complete behavioral contract, architecture, and distribution details.
+- `bootstrap/build/README.md` (symlinked as `build/README.md`): concise vendored entry-point and common-option reference only; do not add detailed configuration guidance.
 
 ## SDD artifacts
 

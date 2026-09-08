@@ -39,7 +39,7 @@ FSharp.Core the engine compiled against — an older one shadows it and the engi
 fails to load at runtime.
 
 The consumer project the integration harness writes into a temp directory is the exception: it
-sits outside the repository and cannot resolve through Paket, so `Helpers.fs` reads the version
+sits outside the repository and cannot resolve through Paket, so `Utils.fs` reads the version
 out of `paket.lock` when generating it.
 
 ## Targets
@@ -53,6 +53,12 @@ Run targets through the entry point:
 This repository uses the `Library` spec; its targets and arguments are listed in
 [`README.md`](README.md).
 
+For `ConsoleApplication`, `RuntimeMode.AutoDetect` and `RuntimeMode.Specific` add the
+selected runtime ID to local `Build`, `Tests`, `Run`, `Watch`, and Mirrord commands. The
+`Specific` target must be included in `RuntimeTargets`; `AutoDetect` is independent of the
+release matrix. Releases publish all configured targets, with `PublishSingleFile` controlling
+whether each runtime's output is bundled.
+
 ## Tests
 
 The `Tests` target runs both suites. To run one directly:
@@ -62,10 +68,11 @@ dotnet run --project tests/unit/unit.fsproj --
 dotnet run --project tests/integration/integration.fsproj --
 ```
 
-The integration matrix is slow: each scenario copies a fixture from `tests/integration/fixtures/`
-to a temp directory and drives a full target graph through it, so it needs `npm` and the NuGet
-feeds. Each copy is deleted when its scenario finishes; set `FBUILD_KEEP_TEMP` to keep it for
-inspection, at the cost of a full build tree per scenario left in `$TMPDIR`:
+The integration tests are slow: each case copies a fixture from `tests/integration/fixtures/`
+to a temp directory and drives a target graph through it, so it needs `npm` and the NuGet feeds.
+Each copy gives the source-referenced engine isolated `bin`/`obj` paths, allowing cases based on
+the same fixture to run concurrently. Each copy is deleted when its case finishes; set
+`FBUILD_KEEP_TEMP` to keep it for inspection, at the cost of a full build tree per case left in `$TMPDIR`:
 
 ```bash
 FBUILD_KEEP_TEMP=1 dotnet run --project tests/integration/integration.fsproj --
@@ -77,8 +84,11 @@ the deployed `build.sh`. Run that one before a release goes out — the only cov
 nuspec dependencies and the bundled support files:
 
 ```bash
-dotnet run --project tests/integration/integration.fsproj -- --filter-test-case "library, packaged engine"
+dotnet run --project tests/integration/integration.fsproj -- --filter-test-case "packaged engine"
 ```
+
+Unit tests cover runtime selection and command argument propagation. The console integration
+scenario publishes Linux x64 and both macOS architectures and checks their unbundled archives.
 
 ## When the engine will not build
 

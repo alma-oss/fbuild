@@ -1,4 +1,4 @@
-module Alma.Build.Tests.Integration.Helpers
+module Alma.Build.Tests.Integration.Utils
 
 open System
 open System.IO
@@ -13,11 +13,27 @@ let root =
 
     find AppDomain.CurrentDomain.BaseDirectory
 
-/// Fixtures reference the engine straight from source, so the matrix exercises whatever is
+/// Fixtures reference the engine straight from source, so the integration tests exercise whatever is
 /// checked out — no repack step between an engine edit and the test seeing it.
 let engineProject = Path.Combine (root, "src", "Alma.Build", "Alma.Build.fsproj")
 
 let fixtures = Path.Combine (root, "tests", "integration", "fixtures")
+
+type Fixture =
+    | Library
+    | LibraryRoot
+    | Executable
+    | Console
+    | Safe
+
+[<RequireQualifiedAccess>]
+module Fixture =
+    let directory = function
+        | Library -> "library"
+        | LibraryRoot -> "library-root"
+        | Executable -> "executable"
+        | Console -> "console"
+        | Safe -> "safe"
 
 // ---- Process execution ----
 
@@ -78,10 +94,17 @@ let private fsharpCoreVersion =
         if matched.Success then Some matched.Groups[1].Value else None)
     |> Option.defaultWith (fun () -> failwith $"No resolved FSharp.Core version found in {lockFile}")
 
-/// A build project that references the engine from source and pins FSharp.Core to the engine's
-/// paket-resolved version — the SDK's implicit lower version would otherwise shadow it and the
-/// engine assembly would fail to load at runtime.
-let private buildFsproj =
+/// A build project that references the engine from source with outputs isolated to this fixture
+/// copy and pins FSharp.Core to the engine's paket-resolved version — the SDK's implicit lower
+/// version would otherwise shadow it and the engine assembly would fail to load at runtime.
+let private engineBuildPaths fixtureDirectory =
+    let separator = string Path.DirectorySeparatorChar
+    Path.Combine (fixtureDirectory, "build", ".engine", "obj") + separator,
+    Path.Combine (fixtureDirectory, "build", ".engine", "bin") + separator
+
+let private buildFsproj fixtureDirectory =
+    let engineIntermediate, engineOutput = engineBuildPaths fixtureDirectory
+
     $"""<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <OutputType>Exe</OutputType>
@@ -93,7 +116,9 @@ let private buildFsproj =
         <Compile Include="Build.fs" />
     </ItemGroup>
     <ItemGroup>
-        <ProjectReference Include="{engineProject}" />
+        <ProjectReference Include="{engineProject}">
+            <AdditionalProperties>BaseIntermediateOutputPath={engineIntermediate};BaseOutputPath={engineOutput}</AdditionalProperties>
+        </ProjectReference>
     </ItemGroup>
     <ItemGroup>
         <PackageReference Include="FSharp.Core" Version="{fsharpCoreVersion}" />
@@ -101,28 +126,32 @@ let private buildFsproj =
 </Project>
 """
 
-/// The engine packs these as `content/` and `Bootstrap` deploys them to consumer repo roots. Taking them
-/// from `bootstrap/` — the same copy that gets packed — is what makes the matrix lint fixture
-/// sources under the real shipped ruleset instead of fsharplint's defaults.
-let private bootstrapAssets = [ "fsharplint.json"; ".editorconfig" ]
-
-let private toolRestoreLock = obj ()
+/// The restores below — the one `dotnet pack` runs for itself included — populate the machine-wide
+/// NuGet package cache, which the scenarios would otherwise write concurrently.
+let private restoreLock = obj ()
 
 /// Copies a checked-in fixture to a throwaway directory and completes it into a runnable consumer
-/// repo: the bootstrap assets, the `build.fsproj` carrying the absolute engine path, and a git repo,
-/// which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`.
-let private prepare (fixture: string) =
-    let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-{fixture}-{Guid.NewGuid():N}")
-    copyInto (Path.Combine (fixtures, fixture)) dir
+/// repo: the `bootstrap/` tree — the same files the packed engine's `Bootstrap` target deploys, so
+/// integration tests lint fixture sources under the real shipped ruleset instead of fsharplint's
+/// defaults — the `build.fsproj` carrying the absolute engine path and isolated output paths, and a
+/// git repo, which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`.
+let private prepare fixture =
+    let fixtureName = Fixture.directory fixture
 
-    for asset in bootstrapAssets do
-        File.Copy (Path.Combine (root, "bootstrap", asset), Path.Combine (dir, asset), true)
+    let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-{fixtureName}-{Guid.NewGuid():N}")
+    copyInto (Path.Combine (fixtures, fixtureName)) dir
+    copyInto (Path.Combine (root, "bootstrap")) dir
 
-    File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), buildFsproj)
+    File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), buildFsproj dir)
+
+    let engineIntermediate, engineOutput = engineBuildPaths dir
+
+    lock restoreLock (fun () ->
+        execOk root "dotnet" $"restore \"{engineProject}\" /p:BaseIntermediateOutputPath=\"{engineIntermediate}\" /p:BaseOutputPath=\"{engineOutput}\"")
 
     execOk dir "git" "init"
     execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
-    lock toolRestoreLock (fun () -> execOk dir "dotnet" "tool restore")
+    lock restoreLock (fun () -> execOk dir "dotnet" "tool restore")
 
     dir
 
@@ -182,7 +211,7 @@ let private packEngine (dir: string) (feed: string) =
         + $"/p:BaseIntermediateOutputPath=\"{intermediate}{separator}\" "
         + $"/p:BaseOutputPath=\"{output}{separator}\""
 
-    execOk root "dotnet" args
+    lock restoreLock (fun () -> execOk root "dotnet" args)
 
 /// Completes a fixture copy into a consumer that resolves the engine as a NuGet package, following
 /// the adoption steps in `README.md`: paket files pinning the engine, the consumer `build.fsproj`,
@@ -191,9 +220,10 @@ let private packEngine (dir: string) (feed: string) =
 ///
 /// Restores run against a NuGet cache inside the throwaway directory. The engine version does not
 /// move between packs, so a cache shared with the machine would hand back an earlier build of it.
-let private preparePackaged (fixture: string) =
-    let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-packaged-{fixture}-{Guid.NewGuid():N}")
-    copyInto (Path.Combine (fixtures, fixture)) dir
+let private preparePackaged fixture =
+    let fixtureName = Fixture.directory fixture
+    let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-packaged-{fixtureName}-{Guid.NewGuid():N}")
+    copyInto (Path.Combine (fixtures, fixtureName)) dir
 
     let feed = Path.Combine (dir, "feed")
     let cache = Path.Combine (dir, "nuget-cache")
@@ -221,24 +251,23 @@ let private cleanup (dir: string) =
     if keepTemp then printfn $"FBUILD_KEEP_TEMP set, kept fixture copy: {dir}"
     else Directory.Delete (dir, true)
 
-/// Runs `target` through the `build.sh` the packaged engine's `Bootstrap` target deployed —
-/// invoked directly, so the executable bit Bootstrap sets is part of what is asserted — then
-/// hands the consumer directory to `assertArtifacts`.
-let withPackagedFixture (fixture: string) (target: string) (assertArtifacts: string -> unit) =
+/// Runs a target against a freshly prepared source-engine fixture and hands its directory to the
+/// assertion callback. Set `FBUILD_KEEP_TEMP` to keep the copy for inspection.
+let withFixture fixture (target: string) (assertArtifacts: string -> unit) =
+    let dir = prepare fixture
+
+    try
+        execOk dir "dotnet" $"run --project build/build.fsproj -- {target}"
+        assertArtifacts dir
+    finally
+        cleanup dir
+
+/// Runs a target through the package-installed engine and its deployed build entrypoint.
+let withPackagedFixture fixture (target: string) (assertArtifacts: string -> unit) =
     let dir, env = preparePackaged fixture
 
     try
         execWithOk env dir (Path.Combine (dir, "build.sh")) target
         assertArtifacts dir
-    finally
-        cleanup dir
-
-/// Runs `body` against a freshly prepared fixture copy, deleting the copy afterwards whether
-/// `body` succeeds or throws. Set `FBUILD_KEEP_TEMP` to keep it for inspection.
-let withFixture (fixture: string) (body: string -> unit) =
-    let dir = prepare fixture
-
-    try
-        body dir
     finally
         cleanup dir

@@ -3,6 +3,7 @@ namespace Alma.Build
 module Utils =
     open System
     open System.IO
+    open System.Runtime.InteropServices
 
     open Fake.Core
     open Fake.DotNet
@@ -71,6 +72,93 @@ module Utils =
         let requireSome error = function
             | Some v -> v
             | None -> failwith error
+
+    type RuntimeIdentifier = private RuntimeIdentifier of string
+
+    [<RequireQualifiedAccess>]
+    module RuntimeIdentifier =
+        let internal create value = RuntimeIdentifier value
+        let value (RuntimeIdentifier value) = value
+
+    type RuntimeTarget =
+        | OSX
+        | OSXArm64
+        | Windows
+        | Linux
+        | ArmLinux
+        | AlpineLinux
+        | RaspberryPiHassioAddon
+        | Custom of string
+
+    [<RequireQualifiedAccess>]
+    module RuntimeTarget =
+        /// Runtime IDs: https://docs.microsoft.com/en-us/dotnet/core/rid-catalog#known-rids
+        let value = function
+            | OSX -> "osx-x64"
+            | OSXArm64 -> "osx-arm64"
+            | Windows -> "win-x64"
+            | Linux -> "linux-x64"
+            | ArmLinux -> "linux-arm64"
+            | AlpineLinux -> "linux-musl-x64"
+            | RaspberryPiHassioAddon -> "alpine.3.16-arm64"
+            | Custom value -> value
+
+        let toRuntimeIdentifier runtimeTarget =
+            runtimeTarget |> value |> RuntimeIdentifier.create
+
+        let detect () =
+            let isMusl = RuntimeInformation.RuntimeIdentifier.Contains "musl"
+
+            match RuntimeInformation.OSArchitecture with
+            | Architecture.X64 when RuntimeInformation.IsOSPlatform OSPlatform.Windows -> Windows
+            | Architecture.X64 when RuntimeInformation.IsOSPlatform OSPlatform.OSX -> OSX
+            | Architecture.Arm64 when RuntimeInformation.IsOSPlatform OSPlatform.OSX -> OSXArm64
+            | Architecture.X64 when RuntimeInformation.IsOSPlatform OSPlatform.Linux && isMusl -> AlpineLinux
+            | Architecture.X64 when RuntimeInformation.IsOSPlatform OSPlatform.Linux -> Linux
+            | Architecture.Arm64 when RuntimeInformation.IsOSPlatform OSPlatform.Linux -> ArmLinux
+            | _ -> Custom RuntimeInformation.RuntimeIdentifier
+
+    [<RequireQualifiedAccess>]
+    type RuntimeMode =
+        | Portable
+        | AutoDetect
+        | Specific of RuntimeTarget
+
+    [<RequireQualifiedAccess>]
+    module RuntimeMode =
+        let internal runtimeIdentifier = function
+            | RuntimeMode.Portable -> None
+            | RuntimeMode.AutoDetect -> Some (RuntimeTarget.detect () |> RuntimeTarget.toRuntimeIdentifier)
+            | RuntimeMode.Specific runtimeTarget -> Some (RuntimeTarget.toRuntimeIdentifier runtimeTarget)
+
+    type RuntimeConfiguration = {
+        RuntimeTargets: RuntimeTarget list
+        RuntimeMode: RuntimeMode
+    }
+
+    [<RequireQualifiedAccess>]
+    type internal RuntimeConfigurationError =
+        | UnsupportedRuntime of RuntimeIdentifier
+
+    [<RequireQualifiedAccess>]
+    module internal RuntimeConfigurationError =
+        let format = function
+            | RuntimeConfigurationError.UnsupportedRuntime runtimeIdentifier ->
+                runtimeIdentifier
+                |> RuntimeIdentifier.value
+                |> sprintf "Build runtime %s is not supported."
+
+    [<RequireQualifiedAccess>]
+    module internal RuntimeConfiguration =
+        let resolve configuration =
+            match configuration.RuntimeMode |> RuntimeMode.runtimeIdentifier with
+            | None -> Ok None
+            | Some selectedRuntimeIdentifier ->
+                configuration.RuntimeTargets
+                |> List.exists (RuntimeTarget.toRuntimeIdentifier >> (=) selectedRuntimeIdentifier)
+                |> function
+                    | true -> Ok (Some selectedRuntimeIdentifier)
+                    | false -> Error (RuntimeConfigurationError.UnsupportedRuntime selectedRuntimeIdentifier)
 
     [<RequireQualifiedAccess>]
     module Solution =
@@ -172,6 +260,17 @@ module Utils =
                     | SAFEStackApplication _ -> true
                     | _ -> false
 
+                member this.RuntimeConfiguration =
+                    match this with
+                    | ConsoleApplication spec ->
+                        Some {
+                            RuntimeTargets = spec.RuntimeTargets
+                            RuntimeMode = spec.RuntimeMode
+                        }
+                    | Library _
+                    | Executable _
+                    | SAFEStackApplication _ -> None
+
         and LibrarySpec =
             {
                 Changelog: string
@@ -216,7 +315,9 @@ module Utils =
             {
                 Changelog: string option
                 ReleaseDir: string
-                RuntimeIds: RuntimeId list
+                RuntimeTargets: RuntimeTarget list
+                RuntimeMode: RuntimeMode
+                PublishSingleFile: bool
                 ReleaseSource: string
                 ApplicationSources: IGlobbingPattern
                 TestsSources: IGlobbingPattern
@@ -252,15 +353,6 @@ module Utils =
                 member this.Sources = this.ReleaseSources
                 member this.Tests = this.TestsSources
                 member this.All = this.AllSources
-
-        and RuntimeId =
-            | OSX
-            | Windows
-            | Linux
-            | ArmLinux
-            | AlpineLinux
-            | RaspberryPiHassioAddon
-            | Other of string
 
         [<RequireQualifiedAccess>]
         module Git =
@@ -310,7 +402,7 @@ module Utils =
                         ++ "build/*.fsproj"
                 }
 
-            let defaultConsoleApplication runtimeIds: ProjectSpec =
+            let defaultConsoleApplication runtimeTargets: ProjectSpec =
                 let sources =
                     !! "./*.fsproj"
                     ++ "src/*.fsproj"
@@ -319,7 +411,9 @@ module Utils =
                 ConsoleApplication {
                     Changelog = if File.Exists "CHANGELOG.md" then Some "CHANGELOG.md" else None
                     ReleaseDir = "./dist"
-                    RuntimeIds = runtimeIds
+                    RuntimeTargets = runtimeTargets
+                    RuntimeMode = RuntimeMode.Portable
+                    PublishSingleFile = true
 
                     ApplicationSources = sources
                     ReleaseSource = sources |> Seq.head
@@ -367,18 +461,6 @@ module Utils =
             let mapSAFEStackApplication f = function
                 | SAFEStackApplication spec -> f spec |> SAFEStackApplication
                 | spec -> spec
-
-        [<RequireQualifiedAccess>]
-        module RuntimeId =
-            /// Runtime IDs: https://docs.microsoft.com/en-us/dotnet/core/rid-catalog#macos-rids
-            let value = function
-                | OSX -> "osx-x64"
-                | Windows -> "win-x64"
-                | Linux -> "linux-x64"
-                | ArmLinux -> "linux-arm64"
-                | AlpineLinux -> "linux-musl-x64"
-                | RaspberryPiHassioAddon -> "alpine.3.16-arm64"
-                | Other other -> other
 
     [<RequireQualifiedAccess>]
     module Http =
