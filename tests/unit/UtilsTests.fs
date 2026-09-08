@@ -1,5 +1,6 @@
 module Alma.Build.Tests.UtilsTests
 
+open System.Runtime.InteropServices
 open Expecto
 open Alma.Build.Utils
 
@@ -96,18 +97,134 @@ let optionTests =
     ]
 
 [<Tests>]
-let runtimeIdTests =
-    testList "RuntimeId.value" [
+let runtimeIdentifierTests =
+    testList "RuntimeIdentifier" [
+        test "should preserve the RID string when an identifier is created" {
+            let result = RuntimeIdentifier.create "linux-x64" |> RuntimeIdentifier.value
+
+            Expect.equal result "linux-x64" "Created runtime identifier should preserve its RID string"
+        }
+
+        test "should use the runtime-provided RID when an identifier is detected" {
+            let result = RuntimeIdentifier.detect () |> RuntimeIdentifier.value
+
+            Expect.equal result RuntimeInformation.RuntimeIdentifier "Detected runtime identifier should match .NET"
+        }
+    ]
+
+[<Tests>]
+let runtimeTargetTests =
+    testList "RuntimeTarget.value" [
         test "should map to the linux RID when given Linux" {
-            Expect.equal (RuntimeId.value Linux) "linux-x64" "Linux maps to linux-x64"
+            let result = RuntimeTarget.value Linux
+
+            Expect.equal result "linux-x64" "Linux maps to linux-x64"
         }
 
         test "should map to the osx RID when given OSX" {
-            Expect.equal (RuntimeId.value OSX) "osx-x64" "OSX maps to osx-x64"
+            let result = RuntimeTarget.value OSX
+
+            Expect.equal result "osx-x64" "OSX maps to osx-x64"
         }
 
-        test "should pass the identifier through when given Other" {
-            Expect.equal (RuntimeId.value (Other "linux-bionic-arm64")) "linux-bionic-arm64" "Other returns its own identifier"
+        test "should pass the identifier through when given Custom" {
+            let result = RuntimeTarget.value (Custom "linux-bionic-arm64")
+
+            Expect.equal result "linux-bionic-arm64" "Custom returns its own identifier"
+        }
+    ]
+
+[<Tests>]
+let runtimeModeTests =
+    testList "RuntimeMode.runtimeIdentifier" [
+        test "should return None when portable mode is selected" {
+            let result = RuntimeMode.runtimeIdentifier RuntimeMode.Portable
+
+            Expect.equal result None "Portable mode does not select a runtime ID"
+        }
+
+        test "should return the selected runtime ID when specific mode is selected" {
+            let result = RuntimeMode.runtimeIdentifier (RuntimeMode.Specific OSXArm64)
+
+            Expect.equal result (Some (RuntimeIdentifier.create "osx-arm64")) "Specific mode resolves the selected runtime target"
+        }
+
+        test "should return the runtime-provided RID when auto-detect mode is selected" {
+            let result = RuntimeMode.runtimeIdentifier RuntimeMode.AutoDetect
+
+            Expect.equal
+                result
+                (Some (RuntimeIdentifier.detect ()))
+                "Auto-detect mode should preserve the runtime-provided RID"
+        }
+    ]
+
+[<Tests>]
+let runtimeConfigurationTests =
+    testList "RuntimeConfiguration" [
+        test "should resolve the detected runtime when it is a release target" {
+            let configuration: RuntimeConfiguration = {
+                RuntimeTargets = [ Custom (RuntimeIdentifier.value (RuntimeIdentifier.detect ())) ]
+                RuntimeMode = RuntimeMode.AutoDetect
+            }
+
+            let result = RuntimeConfiguration.resolve configuration
+
+            Expect.equal result (Ok (Some (RuntimeIdentifier.detect ()))) "Detected RID listed as a release target should be accepted"
+        }
+
+        test "should return UnsupportedRuntime error when the detected runtime is not a release target" {
+            let configuration: RuntimeConfiguration = {
+                RuntimeTargets = [ Custom "totally-fake-rid" ]
+                RuntimeMode = RuntimeMode.AutoDetect
+            }
+
+            let result = RuntimeConfiguration.resolve configuration
+
+            Expect.equal
+                result
+                (Error (RuntimeConfigurationError.UnsupportedRuntime (RuntimeIdentifier.detect ())))
+                "Detected RID absent from release targets should be rejected"
+        }
+
+        test "should accept equivalent runtime IDs when their canonical values match" {
+            let configuration: RuntimeConfiguration = {
+                RuntimeTargets = [ Linux ]
+                RuntimeMode = RuntimeMode.Specific (Custom "linux-x64")
+            }
+
+            let result = RuntimeConfiguration.resolve configuration
+
+            Expect.equal
+                result
+                (Ok (Some (RuntimeIdentifier.create "linux-x64")))
+                "Equivalent RID values should be supported"
+        }
+
+        test "should return UnsupportedRuntime error when the selected runtime is unavailable" {
+            let configuration: RuntimeConfiguration = {
+                RuntimeTargets = [ Windows ]
+                RuntimeMode = RuntimeMode.Specific Linux
+            }
+
+            let result = RuntimeConfiguration.resolve configuration
+
+            Expect.equal
+                result
+                (Error (RuntimeConfigurationError.UnsupportedRuntime (RuntimeIdentifier.create "linux-x64")))
+                "Unavailable RID should be rejected"
+        }
+
+        test "should expose runtime configuration when the project spec supports runtimes" {
+            let result = Spec.defaultConsoleApplication [ Linux ] |> fun spec -> spec.RuntimeConfiguration
+
+            Expect.isSome result "Console application should expose its runtime configuration"
+        }
+
+        test "should expose no runtime configuration when the project spec does not support runtimes" {
+            let result = Spec.defaultLibrary.RuntimeConfiguration
+
+            Expect.isNone result "Library should not expose runtime configuration"
         }
     ]
 

@@ -15,6 +15,37 @@ module Targets =
     open Utils
     open Github.Types
 
+    [<RequireQualifiedAccess>]
+    module internal CommandArguments =
+        let withRuntimeIdentifier runtimeIdentifier command commandArguments =
+            match command, runtimeIdentifier with
+            | Dotnet (Build | Tests | Run | WatchRun), Some runtimeIdentifier ->
+                commandArguments @ [ "-r"; RuntimeIdentifier.value runtimeIdentifier ]
+            | _ -> commandArguments
+
+        let mirrordExecArguments runtimeIdentifier command additionalArguments =
+            let executable, commandArguments = Command.render command
+
+            [ "exec"; "--config-file"; ".mirrord/mirrord.json"; "--"; executable ]
+            @ withRuntimeIdentifier runtimeIdentifier command (commandArguments @ additionalArguments)
+
+    [<RequireQualifiedAccess>]
+    module internal ConsoleRelease =
+        let publishArguments publishSingleFile releaseDir releaseSource runtimeTarget =
+            let runtimeIdentifier = RuntimeTarget.value runtimeTarget
+
+            [
+                "-c"; "Release"
+                sprintf "/p:PublishSingleFile=%b" publishSingleFile
+                // These publishes run in parallel and `obj/project.assets.json` holds one
+                // runtime at a time, so each needs an intermediate directory of its own.
+                sprintf "/p:BaseIntermediateOutputPath=obj/%s/" runtimeIdentifier
+                "-o"; sprintf "%s/%s" releaseDir runtimeIdentifier
+                "--self-contained"
+                "-r"; runtimeIdentifier
+                releaseSource
+            ]
+
     // --------------------------------------------------------------------------------------------------------
     // 2. Targets for FAKE
     // --------------------------------------------------------------------------------------------------------
@@ -102,6 +133,22 @@ module Targets =
 
     let init (definition: ProjectDefinition) =
         Target.initEnvironment ()
+
+        let buildRuntimeIdentifier =
+            match definition.Specs.RuntimeConfiguration with
+            | None -> None
+            | Some configuration ->
+                match RuntimeConfiguration.resolve configuration with
+                | Ok runtimeIdentifier -> runtimeIdentifier
+                | Error error -> error |> RuntimeConfigurationError.format |> failwith
+
+        let run command arguments directory =
+            Command.run command (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments) directory
+
+        let runInRoot command arguments = run command arguments "."
+
+        let runMirrord command arguments =
+            runInRoot Mirrord (CommandArguments.mirrordExecArguments buildRuntimeIdentifier command arguments)
 
         Target.create "Info" (fun _ ->
             let separator sign = Trace.traceFAKE "%s" (String.replicate 69 sign)
@@ -279,19 +326,19 @@ module Targets =
                     |> List.iter (fun project -> run (Dotnet Tests) [ "--no-build"; "--project"; project ] ".")
             )
 
-            let zipRelease releaseDir runtimeIds =
+            let zipRelease releaseDir runtimeTargets =
                 if releaseDir </> "zipCompiled" |> File.exists
                 then
                     Trace.tracefn "\nZipping released files in %s ..." releaseDir
                     run (Command.Raw (releaseDir </> "zipCompiled")) [] "."
 
                 Trace.tracefn "\nZip compiled files"
-                runtimeIds
-                |> List.iter (RuntimeId.value >> fun runtimeId ->
-                    Trace.tracefn " -> zipping %s ..." runtimeId
-                    let zipFile = sprintf "%s.zip" runtimeId
+                runtimeTargets
+                |> List.iter (RuntimeTarget.value >> fun runtimeIdentifier ->
+                    Trace.tracefn " -> zipping %s ..." runtimeIdentifier
+                    let zipFile = sprintf "%s.zip" runtimeIdentifier
                     IO.File.Delete zipFile
-                    Zip.zip releaseDir (releaseDir </> zipFile) !!(releaseDir </> runtimeId </> "*")
+                    Zip.zip releaseDir (releaseDir </> zipFile) !!(releaseDir </> runtimeIdentifier </> "*")
                 )
 
             Target.create "Release" (fun _ ->
@@ -312,14 +359,14 @@ module Targets =
                     !! "**/bin/**/*.nupkg"
                     |> Seq.iter (Shell.moveFile releaseDir)
 
-                | { Specs = ConsoleApplication { RuntimeIds = runtimeIds; ReleaseSource = releaseSource; ReleaseDir = releaseDir } } ->
+                | { Specs = ConsoleApplication { RuntimeTargets = runtimeTargets; ReleaseSource = releaseSource; ReleaseDir = releaseDir; PublishSingleFile = publishSingleFile } } ->
                     let releaseDir = Path.getFullName releaseDir
 
                     Trace.tracefn "\nClean previous releases"
-                    runtimeIds
-                    |> Seq.collect (RuntimeId.value >> fun runtimeId ->
-                        Trace.tracefn " - %s" runtimeId
-                        !! (releaseDir </> runtimeId)
+                    runtimeTargets
+                    |> Seq.collect (RuntimeTarget.value >> fun runtimeIdentifier ->
+                        Trace.tracefn " - %s" runtimeIdentifier
+                        !! (releaseDir </> runtimeIdentifier)
                     )
                     |> Shell.cleanDirs
 
@@ -329,32 +376,19 @@ module Targets =
                     |> Seq.map (tee (Trace.tracefn " - %s"))
                     |> Seq.iter File.delete
 
-                    // Every runtime ID restores into the same `obj/project.assets.json`, so the
-                    // restores cannot overlap each other or the publishes that read the file.
-                    Trace.tracefn "\nRestore each runtime"
-                    runtimeIds
-                    |> List.iter (RuntimeId.value >> fun runtimeId ->
-                        Trace.tracefn " - %s" runtimeId
-                        runInRoot (Dotnet Restore) [ "-r"; runtimeId; releaseSource ]
-                    )
-
                     Trace.tracefn "\nPublish current release"
 
-                    runtimeIds
-                    |> Seq.map (RuntimeId.value >> fun runtimeId ->
-                        toJob (JobName runtimeId) (Dotnet Publish) [
-                            "-c"; "Release"
-                            "/p:PublishSingleFile=true"
-                            "-o"; sprintf "%s/%s" releaseDir runtimeId
-                            "--self-contained"
-                            "--no-restore"
-                            "-r"; runtimeId
-                            releaseSource
-                        ] "."
+                    runtimeTargets
+                    |> List.map (fun runtimeTarget ->
+                        toJob
+                            (JobName (RuntimeTarget.value runtimeTarget))
+                            (Dotnet Publish)
+                            (ConsoleRelease.publishArguments publishSingleFile releaseDir releaseSource runtimeTarget)
+                            "."
                     )
                     |> runParallelWith GroupedByJob
 
-                    runtimeIds |> zipRelease releaseDir
+                    runtimeTargets |> zipRelease releaseDir
 
                 | { Specs = Executable { ReleaseDir = releaseDir } } ->
                     runInRoot (Dotnet Publish) [ "-c"; "Release"; "-o"; releaseDir ]
@@ -364,8 +398,8 @@ module Targets =
 
             Target.create "ZipRelease" (fun _ ->
                 match definition with
-                | { Specs = ConsoleApplication { RuntimeIds = runtimeIds; ReleaseDir = releaseDir } } ->
-                    runtimeIds |> zipRelease releaseDir
+                | { Specs = ConsoleApplication { RuntimeTargets = runtimeTargets; ReleaseDir = releaseDir } } ->
+                    runtimeTargets |> zipRelease releaseDir
                 | _ -> ()
             )
 
@@ -420,7 +454,7 @@ module Targets =
 
             Target.create "WatchMirrord" (fun _ ->
                 Environment.setEnvironVar "RUN_IN" "mirrord"
-                runInRoot Mirrord [ "exec"; "--config-file"; ".mirrord/mirrord.json"; "--"; "dotnet"; "watch"; "run" ]
+                runMirrord (Dotnet WatchRun) []
             )
 
             Target.create "Run" (fun _ ->
@@ -429,7 +463,7 @@ module Targets =
 
             Target.create "RunMirrord" (fun _ ->
                 Environment.setEnvironVar "RUN_IN" "mirrord"
-                runInRoot Mirrord [ "exec"; "--config-file"; ".mirrord/mirrord.json"; "--"; "dotnet"; "run" ]
+                runMirrord (Dotnet Run) []
             )
 
         // --------------------------------------------------------------------------------------------------------

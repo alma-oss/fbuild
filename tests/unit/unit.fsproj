@@ -13,6 +13,7 @@
         <Compile Include="RtkFilterTests.fs" />
         <Compile Include="CommandTests.fs" />
         <Compile Include="UtilsTests.fs" />
+        <Compile Include="TargetsTests.fs" />
         <Compile Include="Program.fs" />
     </ItemGroup>
 

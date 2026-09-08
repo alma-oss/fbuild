@@ -8,7 +8,7 @@ let main args =
     Targets.init {
         Project = {
             Name = "test.library"
-            Summary = "Library fixture for the integration matrix."
+            Summary = "Library fixture for integration tests."
             Git = Git.init ()
         }
         Specs = Spec.defaultLibrary

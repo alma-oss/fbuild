@@ -8,7 +8,7 @@ let main args =
     Targets.init {
         Project = {
             Name = "test.safe"
-            Summary = "SAFE-Stack fixture for the integration matrix."
+            Summary = "SAFE-Stack fixture for integration tests."
             Git = Git.init ()
         }
         Specs = Spec.defaultSAFEStackApplication "5.0.3"
