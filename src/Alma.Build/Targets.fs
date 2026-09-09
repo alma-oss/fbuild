@@ -443,7 +443,8 @@ module Targets =
                     Trace.traceHeader "Pushing to nuget server"
 
                     envVar name
-                    |> Option.iter (Nuget.push releaseDir organization)
+                    |> Option.requireSome (sprintf "Nuget API key not set in environment variable %s." name)
+                    |> Nuget.push releaseDir organization
 
                 | _ -> ()
             )

@@ -4,6 +4,7 @@
 ## Unreleased
 
 - [**BC**] the `RuntimeId` spec type is now `RuntimeTarget` and its `Other` case is now `Custom`.
+- [**BC**] the `Publish` target now crashes if the Nuget API key is not supplied.
 - Added `OSXArm64` runtime target.
 - Console applications can select a portable, auto-detected, or specific runtime ID that is then used by build, run, watch, and Mirrord targets
 - Console application releases can opt out of single-file publishing via a new `PublishSingleFile` spec field.
