@@ -3,6 +3,10 @@
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
 
+- `Bootstrap` now renders `.config/dotnet-tools.json` from the project spec.
+- The tools list excludes `fake-cli` as it's no longer needed for the build process.
+- `.config/dotnet-tools.json` is rendered with `System.Text.Json`.
+
 ## 2.0.0 - 2026-09-09
 - Initial implementation after extracting the hand-copied FAKE build infrastructure into its own library. `README.md` covers the consumer side — targets, adoption, and updating; `CONTRIBUTING.md` covers working on the engine itself.
 - [**BC**] the `RuntimeId` spec type is now `RuntimeTarget` and its `Other` case is now `Custom`.

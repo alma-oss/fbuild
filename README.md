@@ -2,15 +2,15 @@
 
 `fbuild` is a versioned, distributable FAKE + Paket build infrastructure for F# projects.
 
-This repository ships one deliverable: **`Alma.Build`** (`src/Alma.Build/`) — the build
+This repository ships one deliverable: `Alma.Build` (`src/Alma.Build/`), the build
 engine library plus the support files that consuming repositories vendor alongside it.
 
 Current engine version: `2.0.0` (`Version` in `src/Alma.Build/Alma.Build.fsproj`).
 
-## What you get
+## How it works
 
 A consuming repository owns a single build file, `build/Build.fs`, which declares a
-`ProjectDefinition` — project metadata plus one `Spec` case — and passes it to
+`ProjectDefinition` (project metadata plus one `Spec` case) and passes it to
 `Targets.init`. The engine derives the target graph from the spec:
 
 - `Library`
@@ -72,16 +72,16 @@ group Build
     Alma.Build
 ```
 
-`.config/dotnet-tools.json` — Paket is mandatory; `dotnet-fsharplint` backs the `Lint`
-target:
+`.config/dotnet-tools.json` holds a seed, enough to restore Paket and reach the engine.
+`Bootstrap` rewrites it from the engine's own pins in step 4, so the versions here
+only have to work once:
 
 ```json
 {
   "version": 1,
   "isRoot": true,
   "tools": {
-    "paket": { "version": "10.3.1", "commands": [ "paket" ] },
-    "dotnet-fsharplint": { "version": "0.26.10", "commands": [ "dotnet-fsharplint" ] }
+    "paket": { "version": "10.3.1", "commands": [ "paket" ] }
   }
 }
 ```
@@ -129,16 +129,28 @@ into the repo, preserving their directory structure:
 dotnet run --project ./build/build.fsproj -- Bootstrap
 ```
 
-| File              | Purpose                                                |
-| ----------------- | ------------------------------------------------------ |
-| `build.sh`        | entry point: restores tools + packages, runs the build |
-| `.editorconfig`   | formatting rules the engine's `Lint` target assumes    |
-| `fsharplint.json` | lint configuration                                     |
-| `build/README.md` | consumer-facing quick reference                        |
+| File                        | Purpose                                                |
+| --------------------------- | ------------------------------------------------------ |
+| `build.sh`                  | entry point: restores tools + packages, runs the build |
+| `.config/dotnet-tools.json` | the repo's local .NET tools, rendered per spec         |
+| `.editorconfig`             | formatting rules the engine's `Lint` target assumes    |
+| `fsharplint.json`           | lint configuration                                     |
+| `build/README.md`           | consumer-facing quick reference                        |
 
 `Bootstrap` overwrites existing copies and marks `build.sh` executable. The files are
 version-locked to the engine: rerunning `Bootstrap` after a version bump is how
 engine-side changes to lint rules, formatting, or the entry point reach the repo.
+
+`.config/dotnet-tools.json` is rendered from the project spec instead of bundled:
+
+| Tool                | Specs                  |
+| ------------------- | ---------------------- |
+| `paket`             | all                    |
+| `dotnet-fsharplint` | all                    |
+| `fable`             | `SAFEStackApplication` |
+| `femto`             | `SAFEStackApplication` |
+
+It is overwritten like the rest, so a tool added by hand is lost on the next run.
 
 ### 5. Build
 
@@ -186,6 +198,6 @@ Use `Custom "linux-musl-arm64"` for a RID without a predefined `RuntimeTarget` c
 
 ## Further reading
 
-- [`docs/specs/fbuild/spec.md`](docs/specs/fbuild/spec.md) — architecture and design reference.
-- `build/README.md` — consumer-facing quick reference shipped with the engine.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — working on the engine itself.
+- [`docs/specs/fbuild/spec.md`](docs/specs/fbuild/spec.md): architecture and design reference.
+- `build/README.md`: consumer-facing quick reference shipped with the engine.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): working on the engine itself.

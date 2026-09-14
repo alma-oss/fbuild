@@ -4,11 +4,15 @@
   "tools": {
     "paket": {
       "version": "10.3.1",
-      "commands": [ "paket" ]
+      "commands": [
+        "paket"
+      ]
     },
     "dotnet-fsharplint": {
       "version": "0.26.10",
-      "commands": [ "dotnet-fsharplint" ]
+      "commands": [
+        "dotnet-fsharplint"
+      ]
     }
   }
 }

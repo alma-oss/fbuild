@@ -131,16 +131,18 @@ let private buildFsproj fixtureDirectory =
 let private restoreLock = obj ()
 
 /// Copies a checked-in fixture to a throwaway directory and completes it into a runnable consumer
-/// repo: the `bootstrap/` tree — the same files the packed engine's `Bootstrap` target deploys, so
-/// integration tests lint fixture sources under the real shipped ruleset instead of fsharplint's
-/// defaults — the `build.fsproj` carrying the absolute engine path and isolated output paths, and a
-/// git repo, which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`.
+/// repo: the `build.fsproj` carrying the absolute engine path and isolated output paths, a git repo,
+/// which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`, and the
+/// support files, deployed by the engine's own `Bootstrap` target.
+///
+/// `Bootstrap` runs before `dotnet tool restore` because it renders the tools manifest the restore
+/// reads. Lint then runs under the shipped ruleset rather than fsharplint's defaults, and the tool
+/// versions under test are the ones the engine pins.
 let private prepare fixture =
     let fixtureName = Fixture.directory fixture
 
     let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-{fixtureName}-{Guid.NewGuid():N}")
     copyInto (Path.Combine (fixtures, fixtureName)) dir
-    copyInto (Path.Combine (root, "bootstrap")) dir
 
     File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), buildFsproj dir)
 
@@ -151,6 +153,7 @@ let private prepare fixture =
 
     execOk dir "git" "init"
     execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
+    execOk dir "dotnet" "run --project build/build.fsproj -- Bootstrap"
     lock restoreLock (fun () -> execOk dir "dotnet" "tool restore")
 
     dir
@@ -179,13 +182,14 @@ let private packagedBuildFsproj =
 </Project>
 """
 
+/// The seed manifest from the adoption steps in `README.md`, holding only what it takes to reach
+/// the engine: Paket has to be restorable before the package it resolves can render the real one.
 let private packagedTools =
     """{
     "version": 1,
     "isRoot": true,
     "tools": {
-        "paket": { "version": "10.3.1", "commands": [ "paket" ] },
-        "dotnet-fsharplint": { "version": "0.26.10", "commands": [ "dotnet-fsharplint" ] }
+        "paket": { "version": "10.3.1", "commands": [ "paket" ] }
     }
 }
 """
@@ -234,6 +238,8 @@ let private preparePackaged fixture =
     File.WriteAllText (Path.Combine (dir, "paket.dependencies"), packagedDependencies feed)
     File.WriteAllText (Path.Combine (dir, "build", "paket.references"), "group Build\n    Alma.Build\n")
     File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), packagedBuildFsproj)
+
+    Directory.CreateDirectory (Path.Combine (dir, ".config")) |> ignore
     File.WriteAllText (Path.Combine (dir, ".config", "dotnet-tools.json"), packagedTools)
 
     execOk dir "git" "init"

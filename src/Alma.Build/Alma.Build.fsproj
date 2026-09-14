@@ -24,6 +24,7 @@
         <Compile Include="RtkFilter.fs" />
         <Compile Include="Command.fs" />
         <Compile Include="Utils.fs" />
+        <Compile Include="DotnetTools.fs" />
         <Compile Include="Targets.fs" />
     </ItemGroup>
 

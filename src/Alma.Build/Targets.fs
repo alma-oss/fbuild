@@ -206,6 +206,11 @@ module Targets =
 
                 Trace.tracefn " -> %s" relative
             )
+
+            // Output tools manifest based on spec
+            ToolsManifest.path |> Path.getDirectory |> Directory.ensure
+            File.writeString false ToolsManifest.path (ToolsManifest.render (DotnetTools.tools definition.Specs))
+            Trace.tracefn " -> %s" ToolsManifest.path
         )
 
         Target.create "Clean" <| skipOn "no-clean" (fun _ ->

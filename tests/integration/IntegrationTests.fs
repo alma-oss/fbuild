@@ -63,6 +63,13 @@ let integrationTests =
                 Expect.isTrue
                     (fileExists dir "build/README.md")
                     "Bootstrap should deploy the bundled files with their directory structure"
+
+                let manifest = File.ReadAllText (Path.Combine (dir, ".config", "dotnet-tools.json"))
+
+                Expect.stringContains manifest "\"isRoot\": true" "Bootstrap should render a root tools manifest"
+                Expect.stringContains manifest "\"paket\"" "The rendered manifest should pin Paket"
+                Expect.stringContains manifest "\"dotnet-fsharplint\"" "The rendered manifest should pin the linter"
+                Expect.isFalse (manifest.Contains "\"fable\"") "A library should not get the SAFE-stack tools"
                 Expect.isTrue
                     (anyFile dir "release" "*.nupkg")
                     "Release should move a .nupkg into release/ when the engine is consumed as a package")
