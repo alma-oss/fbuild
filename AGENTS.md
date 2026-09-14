@@ -62,6 +62,9 @@ If a project/package was renamed and pack/restore behaves oddly, clear stale art
   - update docs (`README.md`, `CONTRIBUTING.md`, `docs/specs/fbuild/spec.md`) if behavior is user-visible
 - Change a bootstrap asset:
   - update the file in `bootstrap/` (`build.sh`, `fsharplint.json`, `.editorconfig`, `build/README.md`) and note it in `CHANGELOG.md` — consumers rerun `Bootstrap` on a version bump
+- Change what `Bootstrap` deploys:
+  - update `src/Alma.Build/Bootstrap.fs`; a file whose presence or contents follow from the spec goes in `deployedFiles`
+  - note it in `CHANGELOG.md` — consumers rerun `Bootstrap` and commit the result
 
 ## Documentation expectations
 
@@ -71,6 +74,7 @@ When behavior changes, keep docs in sync in the same PR:
 - `CONTRIBUTING.md`: engine-maintainer workflow, validation commands, and repository conventions.
 - `docs/specs/fbuild/spec.md`: complete behavioral contract, architecture, and distribution details.
 - `bootstrap/build/README.md` (symlinked as `build/README.md`): concise vendored entry-point and common-option reference only; do not add detailed configuration guidance.
+- `CHANGELOG.md`: what changed for a consumer and what they have to do about it, coarse and high-level. No implementation details — no internal type, module, or function names, no MSBuild or SDK mechanics, no rationale for how it was built. The mechanics belong in `docs/specs/fbuild/spec.md`.
 
 ## SDD artifacts
 

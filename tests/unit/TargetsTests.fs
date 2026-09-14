@@ -1,6 +1,7 @@
 module Alma.Build.Tests.TargetsTests
 
 open Expecto
+open Alma.Build
 open Alma.Build.Command
 open Alma.Build.Targets
 open Alma.Build.Utils
@@ -17,7 +18,10 @@ let commandArgumentsTests =
 
             results
             |> List.iter (fun result ->
-                Expect.equal result [ "existing"; "-r"; "linux-x64" ] "Runtime ID should follow existing arguments")
+                Expect.equal
+                    result
+                    [ "existing"; "-p:AlmaBuildRuntimeIdentifier=linux-x64" ]
+                    "Runtime ID should follow existing arguments, under the engine's own property")
         }
 
         test "should preserve arguments when portable mode is selected" {
@@ -69,8 +73,8 @@ let commandArgumentsTests =
             Expect.equal
                 results
                 [
-                    [ "exec"; "--config-file"; ".mirrord/mirrord.json"; "--"; "dotnet"; "run"; "-r"; "linux-x64" ]
-                    [ "exec"; "--config-file"; ".mirrord/mirrord.json"; "--"; "dotnet"; "watch"; "run"; "-r"; "linux-x64" ]
+                    [ "exec"; "--config-file"; ".mirrord/mirrord.json"; "--"; "dotnet"; "run"; "-p:AlmaBuildRuntimeIdentifier=linux-x64" ]
+                    [ "exec"; "--config-file"; ".mirrord/mirrord.json"; "--"; "dotnet"; "watch"; "run"; "-p:AlmaBuildRuntimeIdentifier=linux-x64" ]
                 ]
                 "Mirrord should pass the runtime ID to Run and Watch"
         }
