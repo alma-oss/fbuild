@@ -42,8 +42,10 @@ Versioned off a single source of truth: `Version` in
   `Fake.Core.ReleaseNotes`, `Fake.Tools.Git`) — the target graph. Consumed via
   Paket (`src/Alma.Build/paket.references`, group `Build`).
 - **Paket `10.3.1`** — mandatory dependency manager for every build project;
-  restored from `.config/dotnet-tools.json`.
+  restored from `.config/dotnet-tools.json`, which the engine pins and renders.
 - **`dotnet-fsharplint 0.26.10`** — the `Lint` target.
+- **`System.Text.Json`** — renders `.config/dotnet-tools.json`. Part of the
+  `net10.0` shared framework, so no package reference.
 - **Expecto `10.2.1`** — both test suites (`tests/unit`, `tests/integration`),
   referenced directly via `PackageReference`. `FSharp.Core` comes through Paket
   (`paket.references`, group `Build`) in every project consuming the engine —
@@ -97,7 +99,8 @@ Targets are defined in `src/Alma.Build/Targets.fs`. Shared targets: `Info`,
 `Publish`, `ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
 
 `Bootstrap` sits outside every chain: run explicitly, it extracts the support
-files bundled in the engine assembly into the working directory (§5.4).
+files bundled in the engine assembly into the working directory and renders
+`.config/dotnet-tools.json` for the project spec (§5.4).
 
 | Spec | Chain |
 | --- | --- |
@@ -156,7 +159,7 @@ tests/
   unit/                 # Expecto; reaches the internal modules via InternalsVisibleTo
   integration/          # Expecto; one end-to-end scenario per spec case, plus one
                         # that consumes the engine as a package
-    fixtures/           #   a complete consumer repo per case, Build.fs included
+    fixtures/           #   a consumer repo per case, Build.fs included, Bootstrap files excluded
 
 .github/workflows/      # pr-check, tests, publish
 release/                # packed artifacts (git-ignored)
@@ -169,7 +172,7 @@ Git-ignored: `bin/`, `obj/`, `release/`, `.paket/`, `packages/`, `paket-files/`,
 ### A consuming repository
 
 ```
-.config/dotnet-tools.json   # paket + dotnet-fsharplint
+.config/dotnet-tools.json   # rendered by Bootstrap, per spec
 paket.dependencies     # feed sources + group Build → Alma.Build <version>
 paket.lock             # pinned versions
 build.sh               # entry point (deployed by Bootstrap)
@@ -191,9 +194,9 @@ Adoption steps are in `README.md`.
 
 The engine is a plain NuGet package; everything a repo needs beyond it is a
 small set of files committed to that repo. The repository author writes
-`paket.dependencies`, `build/paket.references`, `.config/dotnet-tools.json`,
-and a `build.fsproj` that imports `Paket.Restore.targets`, then runs the
-engine's `Bootstrap` target
+`paket.dependencies`, `build/paket.references`, a seed
+`.config/dotnet-tools.json` holding Paket, and a `build.fsproj` that imports
+`Paket.Restore.targets`, then runs the engine's `Bootstrap` target
 (`dotnet run --project ./build/build.fsproj -- Bootstrap`), which deploys the
 support files. From then on `build.sh` does the rest on every run:
 
@@ -209,7 +212,8 @@ is mandatory across all build projects — there is no Paket-free variant.
 
 ### 5.2 Engine package — `Alma.Build`
 
-- Compiled engine (`RtkFilter.fs`, `Commands.fs`, `Utils.fs`, `Targets.fs`).
+- Compiled engine (`RtkFilter.fs`, `Commands.fs`, `Utils.fs`, `DotnetTools.fs`,
+  `Targets.fs`).
 - **Also carries the non-compiled assets** as embedded resources — the fsproj
   globs `bootstrap/**` with logical names that keep the relative path. The
   `Bootstrap` target extracts them into the consuming repo, which makes them
@@ -264,6 +268,25 @@ overwrites the local edit.
 
 This repository consumes them through symlinks instead of copies — the repo is
 its own first consumer, so the checkout and the bundled payload cannot drift.
+
+`.config/dotnet-tools.json` is the one file `Bootstrap` writes that is not a
+bundled resource: its contents depend on the project spec, so it is rendered
+from `DotnetTools.tools`. Every spec gets `paket`, which `build.sh` restores
+before any target runs, and `dotnet-fsharplint`, which backs `Lint`;
+`SAFEStackApplication` also gets `fable`, which `SafeClean`, `Bundle`, `Run` and
+`WatchTests` invoke, and `femto`, which syncs the npm side of the SAFE template.
+Like the bundled files it is overwritten, so a tool added by hand is lost on the
+next run.
+
+Both modules live in `src/Alma.Build/DotnetTools.fs`, which keeps the version
+pins in one obvious place. The manifest is serialised from a DTO by
+`System.Text.Json` under `JsonNamingPolicy.CamelCase`, the casing the dotnet CLI
+expects for `version`, `isRoot` and `tools`. The tools themselves are a
+`Dictionary` rather than DTO fields, so each tool name is a key rather than a
+property: the naming policy leaves dictionary keys alone, and a name like
+`dotnet-fsharplint` is not a valid property name anyway. The dictionary is
+written in insertion order, so the manifest lists the tools in the order
+`DotnetTools.tools` declares them.
 
 ### 5.5 Command execution and output filtering
 
@@ -393,9 +416,11 @@ processes.
 **Integration — `tests/integration/`.** One or more independent cases exercise each
 `ProjectSpec` shape. Each case copies its checked-in fixture repo out of
 `tests/integration/fixtures/` into a throwaway directory, completes it into a
-runnable consumer repo (bootstrap `fsharplint.json` + `.editorconfig` taken from
-this repo's root, a generated `build.fsproj`, `git init`), drives the requested target
-through the engine's own entry point, and asserts its behavior. Generated project references
+runnable consumer repo (a generated `build.fsproj`, `git init`, then the engine's
+own `Bootstrap` target for the support files), drives the requested target
+through the engine's own entry point, and asserts its behavior. `Bootstrap` runs
+before `dotnet tool restore`, since it renders the manifest the restore reads, so
+no fixture carries a `.config/dotnet-tools.json` of its own. Generated project references
 give every fixture copy isolated engine `bin`/`obj` paths, so cases can run concurrently:
 
 | Fixture | Target | Asserted |
@@ -416,7 +441,9 @@ consumer through Paket, deploys the support files with the packaged engine's
 `Bootstrap` target, and drives `Release` through the `build.sh` it deployed —
 invoked directly, so the executable bit `Bootstrap` sets is asserted too.
 Every other scenario builds the engine from source, so the nuspec dependency set
-and the `Bootstrap` deployment are covered only here. Its restores use a NuGet cache
+is covered only here. Its seed `.config/dotnet-tools.json` holds Paket alone,
+following the adoption steps: Paket has to be restorable before the package it
+resolves can render the real manifest. Its restores use a NuGet cache
 inside the throwaway directory: the engine version does not move between packs,
 and a shared cache would hand back an earlier build of it.
 

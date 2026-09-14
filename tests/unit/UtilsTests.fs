@@ -266,3 +266,4 @@ let teeTests =
             Expect.equal seen 42 "tee runs the side effect on its input"
         }
     ]
+
