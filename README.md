@@ -136,10 +136,19 @@ dotnet run --project ./build/build.fsproj -- Bootstrap
 | `.editorconfig`             | formatting rules the engine's `Lint` target assumes    |
 | `fsharplint.json`           | lint configuration                                     |
 | `build/README.md`           | consumer-facing quick reference                        |
+| `Directory.Build.props`     | only when the spec selects a runtime — carries it into each project |
 
 `Bootstrap` overwrites existing copies and marks `build.sh` executable. The files are
 version-locked to the engine: rerunning `Bootstrap` after a version bump is how
 engine-side changes to lint rules, formatting, or the entry point reach the repo.
+
+`Directory.Build.props` is deployed only when `RuntimeMode` is not `Portable`. `dotnet build`
+rejects a solution that carries a runtime identifier and no project can restate one given on the
+command line, so the engine passes the runtime under its own property name and this file assigns
+it to `RuntimeIdentifier` inside each project — where your own `Condition="'$(RuntimeIdentifier)'
+== '…'"` items keep working. Commit it; while it is missing the build stops and tells you to run
+`Bootstrap`. Like the other files it is overwritten, so fold your own MSBuild properties back in
+after a version bump.
 
 `.config/dotnet-tools.json` is rendered from the project spec instead of bundled:
 

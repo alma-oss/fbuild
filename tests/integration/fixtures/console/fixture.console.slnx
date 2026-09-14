@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/test.console.fsproj" />
+  <Project Path="tests/Tests.fsproj" />
+</Solution>

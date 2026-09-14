@@ -13,14 +13,19 @@ module Targets =
 
     open Command
     open Utils
+    open Bootstrap
     open Github.Types
 
     [<RequireQualifiedAccess>]
     module internal CommandArguments =
+        let takesRuntimeIdentifier = function
+            | Dotnet (Build | Tests | Run | WatchRun) -> true
+            | _ -> false
+
         let withRuntimeIdentifier runtimeIdentifier command commandArguments =
-            match command, runtimeIdentifier with
-            | Dotnet (Build | Tests | Run | WatchRun), Some runtimeIdentifier ->
-                commandArguments @ [ "-r"; RuntimeIdentifier.value runtimeIdentifier ]
+            match runtimeIdentifier with
+            | Some runtimeIdentifier when takesRuntimeIdentifier command ->
+                commandArguments @ [ RuntimeProps.argument runtimeIdentifier ]
             | _ -> commandArguments
 
         let mirrordExecArguments runtimeIdentifier command additionalArguments =
@@ -143,6 +148,12 @@ module Targets =
                 | Error error -> error |> RuntimeConfigurationError.format |> failwith
 
         let run command arguments directory =
+            // If building for a specific runtime and the runtime props file is missing, fail early.
+            match buildRuntimeIdentifier with
+            | Some _ when CommandArguments.takesRuntimeIdentifier command && not (File.exists RuntimeProps.path) ->
+                failwithf "%s is missing. Building for a specific runtime needs it. Run the Bootstrap target first." RuntimeProps.path
+            | _ -> ()
+
             Command.run command (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments) directory
 
         let runInRoot command arguments = run command arguments "."
@@ -176,42 +187,7 @@ module Targets =
             separator "="
         )
 
-        // Deploys the support files bundled in the engine assembly, overwriting local copies —
-        // how a consumer first gets `build.sh` and how a version bump refreshes it.
-        Target.create "Bootstrap" (fun _ ->
-            let assembly = Reflection.Assembly.GetExecutingAssembly ()
-            let prefix = "bootstrap/"
-
-            assembly.GetManifestResourceNames ()
-            |> Seq.map (fun name -> name, name.Replace ('\\', '/'))
-            |> Seq.filter (snd >> String.startsWith prefix)
-            |> Seq.iter (fun (name, normalized) ->
-                let relative = normalized.Substring prefix.Length
-
-                match Path.getDirectory relative with
-                | "" -> ()
-                | dir -> Directory.ensure dir
-
-                use source = assembly.GetManifestResourceStream name
-                use target = IO.File.Create relative
-                source.CopyTo target
-
-                if relative.EndsWith ".sh" && not (OperatingSystem.IsWindows ()) then
-                    IO.File.SetUnixFileMode (
-                        target.SafeFileHandle,
-                        IO.UnixFileMode.UserRead ||| IO.UnixFileMode.UserWrite ||| IO.UnixFileMode.UserExecute
-                        ||| IO.UnixFileMode.GroupRead ||| IO.UnixFileMode.GroupExecute
-                        ||| IO.UnixFileMode.OtherRead ||| IO.UnixFileMode.OtherExecute
-                    )
-
-                Trace.tracefn " -> %s" relative
-            )
-
-            // Output tools manifest based on spec
-            ToolsManifest.path |> Path.getDirectory |> Directory.ensure
-            File.writeString false ToolsManifest.path (ToolsManifest.render (DotnetTools.tools definition.Specs))
-            Trace.tracefn " -> %s" ToolsManifest.path
-        )
+        Target.create "Bootstrap" (fun _ -> Bootstrap.deploy definition.Specs)
 
         Target.create "Clean" <| skipOn "no-clean" (fun _ ->
             !! "./**/bin/Release"
