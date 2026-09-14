@@ -14,6 +14,9 @@ open Utils
 let private fixtureTest setup target label assertArtifacts =
     testCase label <| fun () -> withFixture setup target assertArtifacts
 
+let private editedFixtureTest setup edit target label assertArtifacts =
+    testCase label <| fun () -> withEditedFixture setup edit target assertArtifacts
+
 let private fileExists (dir: string) (relative: string) = File.Exists (Path.Combine (dir, relative))
 
 let private anyFile (dir: string) (relative: string) (pattern: string) =
@@ -21,6 +24,26 @@ let private anyFile (dir: string) (relative: string) (pattern: string) =
     Directory.Exists full && Directory.GetFiles(full, pattern).Length > 0
 
 let private consoleRuntimeIdentifiers = [ "linux-x64"; "osx-x64"; "osx-arm64" ]
+
+let private builtForRuntime (dir: string) (project: string) (assembly: string) =
+    let output = Path.Combine (dir, project, "bin/Debug/net10.0")
+
+    Directory.Exists output
+    && Directory.GetDirectories output
+       |> Array.exists (fun runtime -> File.Exists (Path.Combine (runtime, assembly)))
+
+let private assertConsoleBuiltForRuntime dir =
+    Expect.isTrue
+        (builtForRuntime dir "src" "test.console.dll")
+        "Build should compile the application into its runtime's output directory"
+
+    Expect.isTrue
+        (builtForRuntime dir "tests" "Tests.dll")
+        "Build should compile the test project into its runtime's output directory"
+
+    Expect.isFalse
+        (fileExists dir "src/bin/Debug/net10.0/test.console.dll")
+        "A configured runtime should keep the build out of the runtime-agnostic output"
 
 [<Tests>]
 let integrationTests =
@@ -51,6 +74,32 @@ let integrationTests =
                 Expect.isTrue
                     (archive.Entries |> Seq.exists (fun entry -> entry.FullName.EndsWith "/test.console"))
                     $"Bundled {runtimeIdentifier} release should include the application executable"))
+
+        // The console fixture carries a solution, which `-r` cannot be passed to (`NETSDK1134`).
+        fixtureTest Console "Build" "should build every project of a solution for the runtime"
+            assertConsoleBuiltForRuntime
+
+        // Without a solution the build runs once per project directory, so the runtime reaches each
+        // project only through the root `Directory.Build.props` that Bootstrap deployed.
+        editedFixtureTest
+            Console
+            (fun dir ->
+                let solution = Path.Combine (dir, "fixture.console.slnx")
+                Expect.isTrue (File.Exists solution) "The console fixture should carry the solution this case removes"
+                File.Delete solution)
+            "Build"
+            "should build every project for the runtime without a solution"
+            assertConsoleBuiltForRuntime
+
+        fixtureTest Console "Bootstrap" "should deploy the runtime props when a console application is bootstrapped" (fun dir ->
+            Expect.isTrue
+                (fileExists dir "Directory.Build.props")
+                "Bootstrap should deploy the props that carry the runtime into each project")
+
+        fixtureTest Library "Bootstrap" "should skip the runtime props when a library is bootstrapped" (fun dir ->
+            Expect.isFalse
+                (fileExists dir "Directory.Build.props")
+                "A spec that selects no runtime should not receive the props")
 
         fixtureTest Safe "Bundle" "should publish the server and client when a SAFE application is bundled" (fun dir ->
             Expect.isTrue (anyFile dir "deploy" "*.dll") "Bundle should publish the server into deploy/"
