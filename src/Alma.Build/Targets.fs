@@ -302,7 +302,7 @@ module Targets =
                 finally
                     File.delete candidate
 
-            definition.Sources.All
+            definition.Sources.Build
             |> Seq.map getProjectDetails
             |> Seq.iter (fun (_, _, folderName, attributes) ->
                 createUnlessUnchanged (folderName </> "AssemblyInfo.fs") attributes
@@ -312,12 +312,12 @@ module Targets =
         Target.create "Build" (fun _ ->
             match !! "*.slnx" ++ "*.sln" |> Solution.pick with
             | Some solution -> run (Dotnet Build) [ solution ] "."
-            | None -> definition.Sources.All |> Seq.iter (Path.getDirectory >> run (Dotnet Build) [])
+            | None -> definition.Sources.Build |> Seq.iter (Path.getDirectory >> run (Dotnet Build) [])
         )
 
         Target.create "Lint" <| skipOn "no-lint" (fun _ ->
-            definition.Sources.All
-            ++ "build/build.fsproj"
+            definition.Sources.Build
+            ++ "build/*.fsproj"
             |> Seq.map (fun fsproj -> toJob (JobName fsproj) (Dotnet Lint) [ fsproj ] ".")
             |> runParallelWith GroupedByJob
         )

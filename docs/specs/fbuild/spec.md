@@ -112,6 +112,11 @@ files bundled in the engine assembly into the working directory and renders
 Build arguments: `no-clean` skips `Clean`; `no-lint` skips `Lint`. Default
 target when none is given is `Build`, for every spec case.
 
+`AssemblyInfo` and `Build` work from `Sources.Build`, which covers the
+consumer's own projects; `build.sh` has already built `build/build.fsproj`
+before any target runs, so the harness is not one of them. `Lint` adds
+`build/*.fsproj` back on top of that set.
+
 `Lint` runs one `fsharplint` job per project concurrently and prints each job's
 output as a single block once every job has finished (`GroupedByJob`, §5.5).
 The SAFE targets pair a server job with a client job and run them with live
@@ -236,7 +241,7 @@ is mandatory across all build projects — there is no Paket-free variant.
 | `ConsoleApplication` | `Spec.defaultConsoleApplication runtimeTargets` | `RuntimeTargets`, `RuntimeMode = Portable`, `PublishSingleFile = true`, `ReleaseSource`, `ReleaseDir = ./dist` |
 | `SAFEStackApplication` | `Spec.defaultSAFEStackApplication templateVersion` | Shared/Server/Client + test paths, `DeployPath` |
 
-Every case implements `IProjectSources` (`Sources` / `Tests` / `All` globs) and
+Every case implements `IProjectSources` (`Sources` / `Tests` / `Build` globs) and
 each has a `Spec.map*` function for overriding fields from `Build.fs`.
 
 `NugetApi = NotUsed | AskForKey | Organization of name | KeyInEnvironment of
@@ -371,10 +376,7 @@ let defaultLibrary: ProjectSpec =
         ReleaseDir = "release"
         LibrarySources = sources
         TestsSources = !! "tests/*.fsproj"
-        AllSources =
-            sources
-            ++ "tests/*.fsproj"
-            ++ "build/*.fsproj"
+        BuildSources = sources ++ "tests/*.fsproj"
         Organization = None
         NugetApi = NugetApi.NotUsed
         NugetCustomServerRepository = None
