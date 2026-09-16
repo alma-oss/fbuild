@@ -1,4 +1,5 @@
 group Build
+    FSharp.Core
     Fake.DotNet.Cli
     Fake.IO.FileSystem
     Fake.IO.Zip
