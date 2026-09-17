@@ -1,9 +1,12 @@
-group Build
-    Fake.DotNet.Cli
-    Fake.IO.FileSystem
-    Fake.IO.Zip
-    Fake.Core.Target
-    Fake.Core.UserInput
-    Fake.DotNet.AssemblyInfoFile
-    Fake.Core.ReleaseNotes
-    Fake.Tools.Git
+FSharp.Core
+Fake.DotNet.Cli
+Fake.IO.FileSystem
+Fake.IO.Zip
+Fake.Core.Target
+Fake.Core.UserInput
+Fake.DotNet.AssemblyInfoFile
+Fake.Core.ReleaseNotes
+Fake.Tools.Git
+Microsoft.Build.Framework
+Microsoft.Build.Utilities.Core
+Microsoft.NET.StringTools

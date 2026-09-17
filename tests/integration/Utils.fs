@@ -80,28 +80,16 @@ let rec private copyInto (source: string) (target: string) =
         let name = Path.GetFileName dir
         if not (ignored.Contains name) then copyInto dir (Path.Combine (target, name))
 
-/// The version paket resolved for the engine. The generated project below sits outside the
-/// repository, so it cannot reach `paket.lock` through a `paket.references` of its own and has to
-/// carry the version literally — reading it here keeps the lock the only place it is written down.
-let private fsharpCoreVersion =
-    let lockFile = Path.Combine (root, "paket.lock")
-
-    // A resolved package sits at four spaces; the six-space lines under it are the version
-    // constraints its dependents asked for, which are ranges rather than a version.
-    File.ReadAllLines lockFile
-    |> Seq.tryPick (fun line ->
-        let matched = Text.RegularExpressions.Regex.Match (line, @"^ {4}FSharp\.Core \(([^)]+)\)")
-        if matched.Success then Some matched.Groups[1].Value else None)
-    |> Option.defaultWith (fun () -> failwith $"No resolved FSharp.Core version found in {lockFile}")
-
-/// A build project that references the engine from source with outputs isolated to this fixture
-/// copy and pins FSharp.Core to the engine's paket-resolved version — the SDK's implicit lower
-/// version would otherwise shadow it and the engine assembly would fail to load at runtime.
+/// Intermediate and output paths for the engine built through a fixture's project reference,
+/// isolated to that fixture copy: the scenarios run in parallel over one engine project.
 let private engineBuildPaths fixtureDirectory =
     let separator = string Path.DirectorySeparatorChar
     Path.Combine (fixtureDirectory, "build", ".engine", "obj") + separator,
     Path.Combine (fixtureDirectory, "build", ".engine", "bin") + separator
 
+/// A build project referencing the engine from source. It restores without Paket, so the SDK's
+/// implicit FSharp.Core is disabled here by hand to let the engine's own version flow through the
+/// project reference.
 let private buildFsproj fixtureDirectory =
     let engineIntermediate, engineOutput = engineBuildPaths fixtureDirectory
 
@@ -119,9 +107,6 @@ let private buildFsproj fixtureDirectory =
         <ProjectReference Include="{engineProject}">
             <AdditionalProperties>BaseIntermediateOutputPath={engineIntermediate};BaseOutputPath={engineOutput}</AdditionalProperties>
         </ProjectReference>
-    </ItemGroup>
-    <ItemGroup>
-        <PackageReference Include="FSharp.Core" Version="{fsharpCoreVersion}" />
     </ItemGroup>
 </Project>
 """
@@ -202,6 +187,18 @@ let private packagedDependencies (feed: string) =
     nuget Alma.Build {packagedVersion}
 """
 
+/// A `paket.lock` an adopting repository already carries: a `Build` group resolved before the engine
+/// was added, holding the FSharp.Core its FAKE packages settled on back then. `paket install` keeps a
+/// locked version wherever the new dependency's constraints allow, so the engine's package has to
+/// declare the FSharp.Core it binds to or the consumer loads the stale one and fails at startup.
+let private packagedStaleLock =
+    """GROUP Build
+STORAGE: NONE
+NUGET
+  remote: https://api.nuget.org/v3/index.json
+    FSharp.Core (9.0.202)
+"""
+
 /// Packs the engine into `feed` under `packagedVersion`, keeping its intermediate and output paths
 /// inside the throwaway directory: the scenarios run in parallel and build the engine project from
 /// source, so packing through the shared `src/Alma.Build/obj` would race with them.
@@ -236,6 +233,7 @@ let private preparePackaged fixture =
     packEngine dir feed
 
     File.WriteAllText (Path.Combine (dir, "paket.dependencies"), packagedDependencies feed)
+    File.WriteAllText (Path.Combine (dir, "paket.lock"), packagedStaleLock)
     File.WriteAllText (Path.Combine (dir, "build", "paket.references"), "group Build\n    Alma.Build\n")
     File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), packagedBuildFsproj)
 

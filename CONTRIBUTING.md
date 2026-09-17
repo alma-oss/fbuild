@@ -32,15 +32,17 @@ edits take effect on the next run — there is nothing to repack.
 
 ### FSharp.Core
 
-Take FSharp.Core through `paket.references` in every project that references the engine
-(`build/`, `tests/unit/`, `tests/integration/`), leaving `paket.lock` as the only place the
-version appears. Do not add a literal version pin: these projects must resolve the same
-FSharp.Core the engine compiled against — an older one shadows it and the engine assembly
-fails to load at runtime.
+FSharp.Core sits in the main group of `paket.dependencies` as `~> 10.0` and in
+`src/Alma.Build/paket.references`. The reference is what puts it in the packed nuspec, as
+`>= <locked version> and < 11.0.0`, and the locked version is the one the engine assembly binds to.
+Drop it and the nuspec carries only FAKE's own `FSharp.Core >= 8.0.400`: a consumer whose
+`Build` group already holds an older FSharp.Core keeps it across `paket install`, and the engine
+fails to load (`FileNotFoundException` on `FSharp.Core, Version=10.1.0.0`). The packaged
+integration scenario seeds exactly such a lock and fails without the reference.
 
-The consumer project the integration harness writes into a temp directory is the exception: it
-sits outside the repository and cannot resolve through Paket, so `Utils.fs` reads the version
-out of `paket.lock` when generating it.
+Consumer build projects resolve through Paket, which disables the SDK's implicit FSharp.Core
+reference, so the version a consumer runs is whatever its `Build` group locks — never below the
+nuspec floor.
 
 ## Targets
 
