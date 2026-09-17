@@ -33,6 +33,11 @@ Common targets (`Library` spec):
 - `Publish`
 - `Info`
 
+`Bootstrap` and `Solution` sit outside the chain — run them explicitly. `Solution`
+generates `<Project.Name>.slnx` at the repo root from the project's declared source
+and test projects, overwriting it on every run — like `Bootstrap`, rerun it whenever
+the project's structure changes.
+
 Arguments:
 
 - `no-clean`: skips the `Clean` step.

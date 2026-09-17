@@ -14,6 +14,9 @@ open Utils
 let private fixtureTest setup target label assertArtifacts =
     testCase label <| fun () -> withFixture setup target assertArtifacts
 
+let private fixtureRunTwiceTest setup target label assertArtifacts =
+    testCase label <| fun () -> withFixtureRunTwice setup target assertArtifacts
+
 let private editedFixtureTest setup edit target label assertArtifacts =
     testCase label <| fun () -> withEditedFixture setup edit target assertArtifacts
 
@@ -55,6 +58,50 @@ let integrationTests =
             Expect.isTrue
                 (anyFile dir "release" "*.nupkg")
                 "Release should move a .nupkg into release/ when the project shares the root with a solution file")
+
+        fixtureTest Library "Solution" "should generate a solution listing src and tests when none exists" (fun dir ->
+            let generated = Path.Combine (dir, "test.library.slnx")
+            Expect.isTrue (File.Exists generated) "Solution should write <Project.Name>.slnx when the repo root carries none"
+
+            let content = File.ReadAllText generated
+            Expect.stringContains content "src/test.library/test.library.fsproj" "The generated solution should list the library project"
+            Expect.stringContains content "tests/Tests.fsproj" "The generated solution should list the test project"
+            Expect.isFalse (content.Contains "build/build.fsproj") "The generated solution should not list the build harness")
+
+        editedFixtureTest
+            Library
+            (fun dir -> File.WriteAllText (Path.Combine (dir, "test.library.slnx"), "<Solution></Solution>"))
+            "Solution"
+            "should overwrite a stale <Project.Name>.slnx with freshly generated content"
+            (fun dir ->
+                let content = File.ReadAllText (Path.Combine (dir, "test.library.slnx"))
+
+                Expect.stringContains
+                    content
+                    "src/test.library/test.library.fsproj"
+                    "Solution rewrites its own file with the current project list rather than leaving a stale one"
+                Expect.isFalse (content = "<Solution></Solution>") "The stale placeholder content is replaced")
+
+        fixtureTest LibraryRoot "Solution" "should leave a differently named checked-in solution alone and still generate its own" (fun dir ->
+            let original = File.ReadAllText (Path.Combine (fixtures, "library-root", "fixture.rootlibrary.slnx"))
+            let checkedIn = Path.Combine (dir, "fixture.rootlibrary.slnx")
+            let generated = Path.Combine (dir, "test.rootlibrary.slnx")
+
+            Expect.equal
+                (File.ReadAllText checkedIn)
+                original
+                "Solution only ever writes its own <Project.Name>.slnx, leaving a differently named solution alone"
+            Expect.isTrue (File.Exists generated) "Solution still generates <Project.Name>.slnx alongside it")
+
+        fixtureRunTwiceTest Library "Solution" "should regenerate the same content when run a second time" (fun dir ->
+            let generated = Path.Combine (dir, "test.library.slnx")
+
+            Expect.isTrue (File.Exists generated) "Solution should still have the file it generated on the first run"
+            Expect.stringContains
+                (File.ReadAllText generated)
+                "src/test.library/test.library.fsproj"
+                "Rerunning Solution regenerates the same content rather than corrupting or duplicating it"
+            Expect.equal (Directory.GetFiles(dir, "*.slnx").Length) 1 "Rerunning Solution does not create a second file")
 
         fixtureTest Executable "Release" "should publish the executable when an executable application is released" (fun dir ->
             Expect.isTrue

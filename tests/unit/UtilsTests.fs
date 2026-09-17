@@ -1,28 +1,185 @@
 module Alma.Build.Tests.UtilsTests
 
 open System.Runtime.InteropServices
+open System.Xml.Linq
 open Expecto
 open Alma.Build.Utils
 
 [<Tests>]
 let solutionPickTests =
     testList "Solution.pick" [
-        test "should prefer the .slnx when both a .slnx and a .sln are present" {
-            let result = Solution.pick [ "a.sln"; "b.slnx" ]
+        test "should pick the .slnx when it is the only solution" {
+            let result = Solution.pick [ "build.fsproj"; "a.slnx" ]
 
-            Expect.equal result (Some "b.slnx") ".slnx wins over .sln"
+            Expect.equal result (Ok (Some "a.slnx")) "a lone .slnx is picked"
         }
 
-        test "should fall back to the .sln when no .slnx is present" {
-            let result = Solution.pick [ "a.sln" ]
+        test "should pick the .sln when it is the only solution" {
+            let result = Solution.pick [ "build.fsproj"; "a.sln" ]
 
-            Expect.equal result (Some "a.sln") "a lone .sln is picked"
+            Expect.equal result (Ok (Some "a.sln")) "a lone .sln is picked"
         }
 
         test "should return None when neither a .slnx nor a .sln is present" {
             let result = Solution.pick [ "readme.md"; "build.fsproj" ]
 
-            Expect.equal result None "candidates with no solution file yield None"
+            Expect.equal result (Ok None) "candidates with no solution file yield None"
+        }
+
+        test "should fail listing every solution when a .slnx and a .sln are present" {
+            let result = Solution.pick [ "a.sln"; "build.fsproj"; "b.slnx" ]
+
+            Expect.equal
+                result
+                (Error (SolutionPickError.Ambiguous [ "a.sln"; "b.slnx" ]))
+                "a .sln beside a .slnx leaves no single solution to build"
+        }
+
+        test "should fail listing every solution when two of the same extension are present" {
+            let result = Solution.pick [ "a.slnx"; "b.slnx" ]
+
+            Expect.equal
+                result
+                (Error (SolutionPickError.Ambiguous [ "a.slnx"; "b.slnx" ]))
+                "two .slnx leave no single solution to build"
+        }
+    ]
+
+[<Tests>]
+let solutionRelativeToTests =
+    testList "Solution.relativeTo" [
+        test "should strip the root and use forward slashes when the path uses backslashes" {
+            let result = Solution.relativeTo "/repo" "/repo\\src\\Foo.fsproj"
+
+            Expect.equal result "src/Foo.fsproj" "the Windows separator is normalized regardless of OS"
+        }
+
+        test "should strip the root and keep forward slashes when the path already uses them" {
+            let result = Solution.relativeTo "/repo" "/repo/src/Foo.fsproj"
+
+            Expect.equal result "src/Foo.fsproj" "an already-forward-slashed path passes through unchanged"
+        }
+
+        test "should not add a leading slash for a root-level project" {
+            let result = Solution.relativeTo "/repo" "/repo/build.fsproj"
+
+            Expect.equal result "build.fsproj" "a root-level project keeps no directory component"
+        }
+
+        test "should reach back with a parent segment when the path sits outside the root" {
+            let result = Solution.relativeTo "/repo" "/shared/Core.fsproj"
+
+            Expect.equal result "../shared/Core.fsproj" "a project outside the root stays reachable from the solution"
+        }
+
+        test "should keep the root itself out of the path when the root carries a trailing slash" {
+            let result = Solution.relativeTo "/repo/" "/repo/src/Foo.fsproj"
+
+            Expect.equal result "src/Foo.fsproj" "a trailing separator on the root adds no empty segment"
+        }
+    ]
+
+/// One child of the generated `<Solution>`, in document order.
+type private SolutionEntry =
+    | Folder of name: string * projects: string list
+    | RootProject of path: string
+
+[<Tests>]
+let solutionRenderTests =
+    let attribute name (element: XElement) =
+        match element.Attribute (XName.Get name) with
+        | null -> failtestf "<%s> carries no %s attribute" element.Name.LocalName name
+        | attribute -> attribute.Value
+
+    let entriesOf = function
+        | None -> failtest "render produced no content"
+        | Some (content: string) ->
+            XDocument.Parse(content).Root.Elements ()
+            |> Seq.map (fun element ->
+                match element.Name.LocalName with
+                | "Folder" ->
+                    Folder (
+                        element |> attribute "Name",
+                        element.Elements (XName.Get "Project") |> Seq.map (attribute "Path") |> Seq.toList
+                    )
+                | "Project" -> RootProject (element |> attribute "Path")
+                | other -> failtestf "<%s> is not an element the solution format allows here" other
+            )
+            |> Seq.toList
+
+    testList "Solution.render" [
+        test "should return None when there are no projects" {
+            let result = Solution.render []
+
+            Expect.equal result None "an empty project set renders no file"
+        }
+
+        test "should group projects under a Folder per top-level directory" {
+            let result = Solution.render [ "src/Alma.Build/Alma.Build.fsproj" ] |> entriesOf
+
+            Expect.equal
+                result
+                [ Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ]) ]
+                "a single project is wrapped in its top-level directory's Folder"
+        }
+
+        test "should sort folders by name and projects within a folder by path" {
+            let result =
+                Solution.render [
+                    "tests/unit/unit.fsproj"
+                    "src/Alma.Build/Alma.Build.fsproj"
+                    "tests/integration/integration.fsproj"
+                ]
+                |> entriesOf
+
+            Expect.equal
+                result
+                [
+                    Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ])
+                    Folder ("/tests/", [ "tests/integration/integration.fsproj"; "tests/unit/unit.fsproj" ])
+                ]
+                "src sorts before tests, and integration sorts before unit within tests"
+        }
+
+        test "should list a root-level project unwrapped after every folder" {
+            let result = Solution.render [ "build.fsproj"; "src/Alma.Build/Alma.Build.fsproj" ] |> entriesOf
+
+            Expect.equal
+                result
+                [
+                    Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ])
+                    RootProject "build.fsproj"
+                ]
+                "a project with no directory component is unwrapped, after the src Folder"
+        }
+
+        test "should emit no Folder when every project sits at the root" {
+            let result = Solution.render [ "test.rootlibrary.fsproj"; "build.fsproj" ] |> entriesOf
+
+            Expect.equal
+                result
+                [ RootProject "build.fsproj"; RootProject "test.rootlibrary.fsproj" ]
+                "root-level projects are listed on their own, sorted by path"
+        }
+
+        test "should collapse duplicate paths from overlapping globs" {
+            let result =
+                Solution.render [ "src/Alma.Build/Alma.Build.fsproj"; "src/Alma.Build/Alma.Build.fsproj" ]
+                |> entriesOf
+
+            Expect.equal
+                result
+                [ Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ]) ]
+                "the duplicate contributes only one Project entry"
+        }
+
+        test "should indent by two spaces and end with a newline" {
+            let result = Solution.render [ "build.fsproj"; "src/Alma.Build/Alma.Build.fsproj" ]
+
+            Expect.equal
+                result
+                (Some "<Solution>\n  <Folder Name=\"/src/\">\n    <Project Path=\"src/Alma.Build/Alma.Build.fsproj\" />\n  </Folder>\n  <Project Path=\"build.fsproj\" />\n</Solution>\n")
+                "the generated file matches the formatting of a hand-written .slnx"
         }
     ]
 

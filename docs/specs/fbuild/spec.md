@@ -100,12 +100,16 @@ Consumer-repo command surface is one script:
 ### Target graph
 
 Targets are defined in `src/Alma.Build/Targets.fs`. Shared targets: `Info`,
-`Bootstrap`, `Clean`, `AssemblyInfo`, `Build`, `Lint`, `Tests`, `Release`,
-`Publish`, `ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
+`Bootstrap`, `Solution`, `Clean`, `AssemblyInfo`, `Build`, `Lint`, `Tests`,
+`Release`, `Publish`, `ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
 
 `Bootstrap` sits outside every chain: run explicitly, it extracts the support
 files bundled in the engine assembly into the working directory and writes the
 files that follow from the project spec (§5.4).
+
+`Solution` also sits outside every chain: run explicitly, it generates the
+repo's `.slnx` from the project's declared sources, overwriting it on every
+run (§5.6).
 
 | Spec | Chain |
 | --- | --- |
@@ -338,6 +342,9 @@ alone, and `dotnet-fsharplint` is not a valid property name. Insertion order is
 preserved, so the manifest lists the tools in the order `DotnetTools.tools`
 declares them.
 
+`Bootstrap` finishes by printing a reminder to run the `Solution` target
+(§5.6), since a fresh consumer would otherwise not know that target exists.
+
 ### 5.5 Command execution and output filtering
 
 No target shells out directly. Every external process goes through the
@@ -377,6 +384,46 @@ chatter.
 When `RTK_ACTIVE` is unset, every command resolves to a direct spawn with no
 filter, so output is byte-identical to running the tool by hand. `Args.run`
 returns exit code 1 on a failed build either way.
+
+### 5.6 Solution file generation
+
+`Solution.current` (§3, the `Build` target) only *chooses among* `.slnx`/`.sln`
+files that already exist. The `Solution` target complements it by *generating*
+`<Project.Name>.slnx`, so a fresh consumer gets a working IDE solution without
+hand-authoring it.
+
+- Runs standalone, outside every target chain, the same way `Bootstrap` does.
+- Always writes `<Project.Name>.slnx` at the repo root, overwriting whatever is
+  there — like `Bootstrap`'s support files, it is meant to be rerun whenever the
+  project's structure changes, and the rewritten file is committed.
+- Collects every project the engine already knows about — the current
+  `ProjectDefinition`'s `Sources.Build` — and groups them into one
+  `<Folder Name="/<top-level-dir>/">` per distinct top-level path segment
+  among those projects, each folder's `<Project>` entries sorted by path. A
+  project that sits directly at the repo root, with no directory component,
+  is listed unwrapped, outside any folder. The internal `Solution.relativeTo`
+  does the path normalization — forward slashes on every OS, and a `../`
+  segment for a project outside the root — and the internal `Solution.render`
+  the grouping; both are pure, so the shape is unit-tested with no filesystem.
+- `build/build.fsproj` is therefore absent from the generated solution, for the
+  reason it is absent from `Sources.Build` (§3): `build.sh` has already built
+  the harness before any target runs, so listing it would make every
+  `dotnet build <solution>` recompile it. The hand-written `fbuild.slnx` does
+  carry it; a generated solution is not expected to match it project for
+  project.
+- An empty `Sources.Build` renders no file, and the target traces why, rather
+  than overwriting a real solution with an empty `<Solution>`.
+- Writes the result to `<Project.Name>.slnx` at the repo root, matching the
+  naming convention this engine's own consumers already use by hand
+  (`fbuild.slnx`, `TucConsole.slnx`, `localities-adminConsole.slnx`), rather
+  than a fixed generic filename.
+- If `Solution.current` (§3) finds a *different* file already at the repo
+  root — a differently named `.slnx`, or any `.sln` — the target warns before
+  writing: two solution files leaves `Build`'s pick between them unspecified,
+  so at most one should stay committed.
+
+Out of scope: preserving manual `<Folder>` reshuffling or other hand edits
+across a regeneration — a rerun always replaces the file's content wholesale.
 
 ## 6. Workflows
 
@@ -459,7 +506,8 @@ not mistaken for tests).
 **Unit — `tests/unit/`.** Covers the pure parts the rest of the engine is built
 on: the output filters (`RtkFilterTests`), the command vocabulary, transport
 selection, tee decision and trace compaction (`CommandTests`), runtime resolution
-(`UtilsTests`), the tool pins and manifest rendering (`DotnetToolsTests`), the
+and solution rendering (`UtilsTests`), the tool pins and manifest rendering
+(`DotnetToolsTests`), the
 deployed-file table (`BootstrapTests`), and runtime command construction
 (`TargetsTests`). Fast, spawns no processes.
 
@@ -486,6 +534,10 @@ give every fixture copy isolated engine `bin`/`obj` paths, so cases can run conc
 | `console`, solution deleted | `Build` | the same, with `Build` fanning out per project directory |
 | `console` | `Bootstrap` | `Directory.Build.props` deployed |
 | `library` | `Bootstrap` | no `Directory.Build.props` deployed |
+| `library` | `Solution` | generated `.slnx` lists `src/` and `tests/`, not `build/` |
+| `library`, stale `.slnx` | `Solution` | stale `<Project.Name>.slnx` overwritten with fresh content |
+| `library-root` | `Solution` | differently named checked-in solution left alone; own `.slnx` generated alongside it |
+| `library` | `Solution` run twice | second run regenerates identical content, no second file |
 | `safe` | `Bundle` | a server `.dll` in `deploy/`, an `.html` in `deploy/public/` |
 
 Landing on the terminal target pulls the whole chain (`AssemblyInfo`, `Build`,
@@ -539,6 +591,8 @@ cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 - Adding a dependency to the engine — it lands in every consuming repo.
 - Changing which files `Bootstrap` deploys — a removed file lingers in every
   consuming repo until deleted by hand.
+- Changing `Solution`'s folder-grouping rule or generated filename — every
+  consumer that has not yet run it gets whatever the rule says at the time.
 
 **Never:**
 

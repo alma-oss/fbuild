@@ -273,6 +273,18 @@ let withEditedFixture fixture (edit: string -> unit) (target: string) (assertArt
 let withFixture fixture (target: string) (assertArtifacts: string -> unit) =
     withEditedFixture fixture ignore target assertArtifacts
 
+/// Runs a target twice against a freshly prepared source-engine fixture, so `assertArtifacts` can
+/// verify a target that generates a file on its first run leaves it alone on the second.
+let withFixtureRunTwice fixture (target: string) (assertArtifacts: string -> unit) =
+    let dir = prepare fixture
+
+    try
+        execOk dir "dotnet" $"run --project build/build.fsproj -- {target}"
+        execOk dir "dotnet" $"run --project build/build.fsproj -- {target}"
+        assertArtifacts dir
+    finally
+        cleanup dir
+
 /// Runs a target through the package-installed engine and its deployed build entrypoint.
 let withPackagedFixture fixture (target: string) (assertArtifacts: string -> unit) =
     let dir, env = preparePackaged fixture

@@ -116,3 +116,6 @@ module Bootstrap =
                 contents |> DeployedContents.writeTo deployedFile.Path
                 Trace.tracefn " -> %s" deployedFile.Path
         )
+
+        if Solution.all () |> List.isEmpty then
+            Trace.tracefn "Run the Solution target to generate a solution file for this project."

@@ -3,8 +3,7 @@
     <Project Path="src/Alma.Build/Alma.Build.fsproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/unit/unit.fsproj" />
     <Project Path="tests/integration/integration.fsproj" />
+    <Project Path="tests/unit/unit.fsproj" />
   </Folder>
-  <Project Path="build/build.fsproj" />
 </Solution>

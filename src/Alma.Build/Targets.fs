@@ -189,6 +189,25 @@ module Targets =
 
         Target.create "Bootstrap" (fun _ -> Bootstrap.deploy definition.Specs)
 
+        Target.create "Solution" (fun _ ->
+            let root = IO.Directory.GetCurrentDirectory ()
+            let path = sprintf "%s.slnx" definition.Project.Name
+
+            match Solution.all () |> List.filter (fun other -> IO.Path.GetFullPath other <> IO.Path.GetFullPath path) with
+            | [] -> ()
+            | others ->
+                Trace.traceImportantfn
+                    "%s already sits at the repo root alongside %s; keep only one committed, since Build fails on more than one solution."
+                    (others |> List.map (Solution.relativeTo root) |> String.concat ", ")
+                    path
+
+            match definition.Sources.Build |> Seq.map (Solution.relativeTo root) |> Solution.render with
+            | Some content ->
+                IO.File.WriteAllText(path, content)
+                Trace.tracefn "Wrote %s" path
+            | None -> Trace.tracefn "No projects to render into a solution; nothing written."
+        )
+
         Target.create "Clean" <| skipOn "no-clean" (fun _ ->
             !! "./**/bin/Release"
             ++ "./**/bin/Debug"
@@ -286,14 +305,14 @@ module Targets =
         )
 
         Target.create "Build" (fun _ ->
-            match !! "*.slnx" ++ "*.sln" |> Solution.pick with
-            | Some solution -> run (Dotnet Build) [ solution ] "."
-            | None -> definition.Sources.Build |> Seq.iter (Path.getDirectory >> run (Dotnet Build) [])
+            match Solution.current () with
+            | Ok (Some solution) -> run (Dotnet Build) [ solution ] "."
+            | Ok None -> definition.Sources.Build |> Seq.iter (Path.getDirectory >> run (Dotnet Build) [])
+            | Error error -> error |> SolutionPickError.format |> failwith
         )
 
         Target.create "Lint" <| skipOn "no-lint" (fun _ ->
-            definition.Sources.Build
-            ++ "build/*.fsproj"
+            Seq.append definition.Sources.Build (!! "build/*.fsproj")
             |> Seq.map (fun fsproj -> toJob (JobName fsproj) (Dotnet Lint) [ fsproj ] ".")
             |> runParallelWith GroupedByJob
         )

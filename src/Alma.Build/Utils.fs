@@ -161,15 +161,77 @@ module Utils =
                     | false -> Error (RuntimeConfigurationError.UnsupportedRuntime selectedRuntimeIdentifier)
 
     [<RequireQualifiedAccess>]
-    module Solution =
-        /// `.slnx` wins over `.sln`; `None` when the candidates hold neither.
-        let pick (candidates: seq<string>): string option =
-            let firstWith extension =
-                candidates
-                |> Seq.filter (fun candidate -> IO.Path.GetExtension(candidate).ToLowerInvariant () = extension)
-                |> Seq.tryHead
+    type SolutionPickError =
+        | Ambiguous of candidates: string list
 
-            firstWith ".slnx" |> Option.orElse (firstWith ".sln")
+    [<RequireQualifiedAccess>]
+    module SolutionPickError =
+        let format = function
+            | SolutionPickError.Ambiguous candidates ->
+                candidates
+                |> String.concat ", "
+                |> sprintf "Found several solutions (%s); keep only one committed so the build knows which to use."
+
+    [<RequireQualifiedAccess>]
+    module Solution =
+        open System.Xml.Linq
+
+        /// The single `.slnx`/`.sln` among the candidates; `Ok None` when there is none.
+        let pick (candidates: seq<string>): Result<string option, SolutionPickError> =
+            let isSolution (candidate: string) =
+                [ ".slnx"; ".sln" ] |> List.contains (IO.Path.GetExtension(candidate).ToLowerInvariant ())
+
+            match candidates |> Seq.filter isSolution |> Seq.toList with
+            | [] -> Ok None
+            | [ solution ] -> Ok (Some solution)
+            | several -> Error (SolutionPickError.Ambiguous several)
+
+        /// Every `.slnx`/`.sln` sitting at the current directory.
+        let internal all () = !! "*.slnx" ++ "*.sln" |> Seq.toList
+
+        /// The solution sitting at the current directory, if any.
+        let internal current () = all () |> pick
+
+        /// Forward-slashed and relative to `root`, which a path outside it reaches back into with `../`.
+        let internal relativeTo (root: string) (path: string): string =
+            let forwardSlashed (value: string) = value.Replace('\\', '/')
+
+            IO.Path.GetRelativePath(forwardSlashed root, forwardSlashed path) |> forwardSlashed
+
+        /// `.slnx` contents for the given forward-slashed relative project paths; `None` when there are none.
+        let internal render (projects: seq<string>): string option =
+            let topLevelDirectory (path: string) =
+                match path.IndexOf '/' with
+                | -1 -> None
+                | index -> Some (path.Substring(0, index))
+
+            let projectElement path = XElement(XName.Get "Project", XAttribute(XName.Get "Path", path))
+
+            let folderElement name paths =
+                XElement(
+                    XName.Get "Folder",
+                    XAttribute(XName.Get "Name", sprintf "/%s/" name),
+                    paths |> List.sort |> List.map projectElement
+                )
+
+            let projects = projects |> Seq.distinct |> Seq.toList
+
+            let folders =
+                projects
+                |> List.choose (fun path -> path |> topLevelDirectory |> Option.map (fun directory -> directory, path))
+                |> List.groupBy fst
+                |> List.sortBy fst
+                |> List.map (fun (directory, pairs) -> folderElement directory (pairs |> List.map snd))
+
+            let rootProjects =
+                projects
+                |> List.filter (topLevelDirectory >> Option.isNone)
+                |> List.sort
+                |> List.map projectElement
+
+            match folders @ rootProjects with
+            | [] -> None
+            | children -> Some (XElement(XName.Get "Solution", children).ToString() + "\n")
 
     [<RequireQualifiedAccess>]
     module Nuget =
