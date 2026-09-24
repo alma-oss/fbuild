@@ -40,18 +40,25 @@ Versioned off a single source of truth: `Version` in
 - **FAKE** (`Fake.Core.Target`, `Fake.DotNet.Cli`, `Fake.IO.FileSystem`,
   `Fake.IO.Zip`, `Fake.Core.UserInput`, `Fake.DotNet.AssemblyInfoFile`,
   `Fake.Core.ReleaseNotes`, `Fake.Tools.Git`) — the target graph. Consumed via
-  Paket (`src/Alma.Build/paket.references`, group `Build`).
+  Paket in the main group: the engine ships FAKE onward as a package dependency,
+  so it is the library's own dependency and not build-only tooling.
 - **Paket `10.3.1`** — mandatory dependency manager for every build project;
   restored from `.config/dotnet-tools.json`, which the engine pins and renders.
 - **`dotnet-fsharplint 0.26.10`** — the `Lint` target.
 - **`System.Text.Json`** — renders `.config/dotnet-tools.json`. Part of the
   `net10.0` shared framework, so no package reference.
-- **Expecto `10.2.1`** — both test suites (`tests/unit`, `tests/integration`),
-  referenced directly via `PackageReference`. `FSharp.Core` comes through Paket
-  (`paket.references`, group `Build`) in every project consuming the engine —
-  the self-host runner and both test projects — locked at `10.1.300`, with
-  `DisableImplicitFSharpCoreReference` so the SDK's implicit lower version does
-  not shadow the one the engine assembly was compiled against.
+- **Expecto `~> 10.2`** — both test suites (`tests/unit`, `tests/integration`),
+  through Paket's `Tests` group.
+- **`FSharp.Core ~> 10.0`** — main group, and listed in the engine's
+  `paket.references` so the packed nuspec declares it as
+  `[<locked version>, 11.0.0)`. The locked version is the one the engine assembly
+  binds to, and a consumer's `Build` group cannot resolve below it. Without the
+  declaration the nuspec only carries FAKE's `>= 8.0.400`; a consumer whose lock
+  already holds an older FSharp.Core keeps it across `paket install` and fails at
+  startup with `FileNotFoundException` on `FSharp.Core`.
+- **`Microsoft.Build.* >= 18.0 < 18.10`** — main group and the engine's
+  `paket.references`, so consumers resolve the last `net10.0`-targeting MSBuild
+  packages (§12).
 - **bash** and **git** — required at build time (`build.sh`, and `Git.init`
   shells out to `git rev-parse`).
 - **Node/npm** — required by the SAFE-stack project type, and therefore by the
@@ -126,7 +133,7 @@ Every other target is serial.
 CHANGELOG.md            # release notes; parsed by the AssemblyInfo target
 CONTRIBUTING.md         # working on the engine itself
 fbuild.slnx             # solution: src/Alma.Build, build, both test projects
-paket.dependencies      # group Build → the engine's own FAKE dependencies
+paket.dependencies      # main group → the engine's own dependencies; Tests group → Expecto
 paket.lock              # authoritative version pin
 build.sh                # symlink to bootstrap/build.sh — also this repo's entry point
 fsharplint.json         # symlink to bootstrap/fsharplint.json
@@ -147,12 +154,12 @@ src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
                         #   Args, Solution, Nuget, Http, Github helpers
   Targets.fs            #   the FAKE target graph for every project type
   Alma.Build.fsproj     #   Version + metadata; embeds bootstrap/** as resources
-  paket.references      #   FAKE dependencies (group Build)
+  paket.references      #   FSharp.Core, FAKE, the Microsoft.Build.* cap — the packed nuspec's deps
 
 build/                  # SELF-HOST runner
   Build.fs              #   Library spec over src/Alma.Build
   build.fsproj          #   ProjectReference to src/Alma.Build
-  paket.references      #   FSharp.Core (group Build)
+  paket.references      #   FSharp.Core (main group)
   README.md             #   symlink to bootstrap/build/README.md
 
 tests/
@@ -532,3 +539,10 @@ cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 - **Engine API stability** — `Build.fs` is author-owned and hand-edited on
   breaking changes, so the `Targets`/`Spec` surface must stay small and stable,
   backed by clear release notes.
+- **`Microsoft.Build.*` capped below 18.10.** `Fake.DotNet.MSBuild` asks for
+  `Microsoft.Build.Framework`, `Microsoft.Build.Utilities.Core`, and
+  `Microsoft.NET.StringTools` at `>= 17.5`; 18.10 moved them to `net11.0`, and a
+  `net10.0` project resolving them warns on every build. The engine caps all
+  three at `>= 18.0 < 18.10` in its `paket.references`, so the cap travels
+  through the nuspec to every consumer's build project. Lift it when the engine
+  targets `net11.0`.

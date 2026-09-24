@@ -1,0 +1,2 @@
+# Marks the fixtures as their own Paket scope. Without a boundary file here, a root
+# `paket install` treats every fixture project as one of its own and rewrites it.

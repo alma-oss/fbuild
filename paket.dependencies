@@ -1,11 +1,25 @@
-group Build
-    source https://api.nuget.org/v3/index.json
+framework: net10.0
+storage: none
 
-    nuget Fake.Core.ReleaseNotes
-    nuget Fake.Core.Target
-    nuget Fake.Core.UserInput
-    nuget Fake.DotNet.AssemblyInfoFile
-    nuget Fake.DotNet.Cli
-    nuget Fake.IO.FileSystem
-    nuget Fake.IO.Zip
-    nuget Fake.Tools.Git
+source https://api.nuget.org/v3/index.json
+
+nuget FSharp.Core ~> 10.0
+
+nuget Fake.Core.ReleaseNotes
+nuget Fake.Core.Target
+nuget Fake.Core.UserInput
+nuget Fake.DotNet.AssemblyInfoFile
+nuget Fake.DotNet.Cli
+nuget Fake.IO.FileSystem
+nuget Fake.IO.Zip
+nuget Fake.Tools.Git
+
+nuget Microsoft.Build.Framework >= 18.0 < 18.10
+nuget Microsoft.Build.Utilities.Core >= 18.0 < 18.10
+nuget Microsoft.NET.StringTools >= 18.0 < 18.10
+
+// [ TESTS GROUP ]
+group Tests
+    storage none
+    source https://api.nuget.org/v3/index.json
+    nuget Expecto ~> 10.2

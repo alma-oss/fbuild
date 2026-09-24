@@ -5,7 +5,6 @@
         <TargetFramework>net10.0</TargetFramework>
         <IsPackable>false</IsPackable>
         <NoWarn>NU1510</NoWarn>
-        <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     </PropertyGroup>
     <ItemGroup>
         <Compile Include="Build.fs" />

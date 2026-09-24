@@ -1,2 +1,2 @@
-group Build
-    FSharp.Core
+group Tests
+    Expecto
