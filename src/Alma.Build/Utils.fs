@@ -268,7 +268,10 @@ module Utils =
         type IProjectSources =
             abstract member Sources: IGlobbingPattern
             abstract member Tests: IGlobbingPattern
-            abstract member Build: IGlobbingPattern
+
+        type IProjectSources with
+            /// Every source and test project.
+            member this.Build: seq<string> = Seq.append this.Sources this.Tests |> Seq.distinct
 
         type ProjectDefinition =
             {
@@ -339,7 +342,6 @@ module Utils =
                 ReleaseDir: string
                 LibrarySources: IGlobbingPattern
                 TestsSources: IGlobbingPattern
-                BuildSources: IGlobbingPattern
                 /// Organization (it is used for a custom github nuget source)
                 Organization: string option
                 /// Configuration for nuget api, to push packages into
@@ -351,7 +353,6 @@ module Utils =
             interface IProjectSources with
                 member this.Sources = this.LibrarySources
                 member this.Tests = this.TestsSources
-                member this.Build = this.BuildSources
 
         and [<RequireQualifiedAccess>] NugetApi =
             | NotUsed
@@ -365,13 +366,11 @@ module Utils =
                 ReleaseDir: string
                 ApplicationSources: IGlobbingPattern
                 TestsSources: IGlobbingPattern
-                BuildSources: IGlobbingPattern
             }
 
             interface IProjectSources with
                 member this.Sources = this.ApplicationSources
                 member this.Tests = this.TestsSources
-                member this.Build = this.BuildSources
 
         and ConsoleApplicationSpec =
             {
@@ -383,13 +382,11 @@ module Utils =
                 ReleaseSource: string
                 ApplicationSources: IGlobbingPattern
                 TestsSources: IGlobbingPattern
-                BuildSources: IGlobbingPattern
             }
 
             interface IProjectSources with
                 member this.Sources = this.ApplicationSources
                 member this.Tests = this.TestsSources
-                member this.Build = this.BuildSources
 
         and SAFEStackApplicationSpec =
             {
@@ -408,13 +405,11 @@ module Utils =
 
                 ReleaseSources: IGlobbingPattern
                 TestsSources: IGlobbingPattern
-                BuildSources: IGlobbingPattern
             }
 
             interface IProjectSources with
                 member this.Sources = this.ReleaseSources
                 member this.Tests = this.TestsSources
-                member this.Build = this.BuildSources
 
         [<RequireQualifiedAccess>]
         module Git =
@@ -438,7 +433,6 @@ module Utils =
                     ReleaseDir = "release"
                     LibrarySources = sources
                     TestsSources = !! "tests/*.fsproj"
-                    BuildSources = sources ++ "tests/*.fsproj"
                     Organization = None
                     NugetApi = NugetApi.NotUsed
                     NugetCustomServerRepository = None
@@ -455,7 +449,6 @@ module Utils =
 
                     ApplicationSources = release
                     TestsSources = !! "tests/**/*.fsproj"
-                    BuildSources = release ++ "tests/**/*.fsproj"
                 }
 
             let defaultConsoleApplication runtimeTargets: ProjectSpec =
@@ -474,7 +467,6 @@ module Utils =
                     ApplicationSources = sources
                     ReleaseSource = sources |> Seq.head
                     TestsSources = !! "tests/*.fsproj"
-                    BuildSources = sources ++ "tests/*.fsproj"
                 }
 
             let defaultSAFEStackApplication templateVersion: ProjectSpec =
@@ -496,7 +488,6 @@ module Utils =
 
                     ReleaseSources = release
                     TestsSources = !! "tests/**/*.fsproj"
-                    BuildSources = release ++ "tests/**/*.fsproj"
                 }
 
             let mapLibrary f = function

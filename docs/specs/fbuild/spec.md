@@ -122,13 +122,17 @@ Build arguments: `no-clean` skips `Clean`; `no-lint` skips `Lint`. Default
 target when none is given is `Build`, for every spec case.
 
 `AssemblyInfo` and `Build` work from `Sources.Build`, which covers the
-consumer's own projects; `build.sh` has already built `build/build.fsproj`
+consumer's own projects. It is not a spec field: it always derives from the
+spec's sources plus its tests, each project once, so a spec that overrides
+either one cannot leave it behind; `build.sh` has already built `build/build.fsproj`
 before any target runs, so the harness is not one of them. `Lint` adds
 `build/*.fsproj` back on top of that set.
 
-`Build` prefers a solution in the repository root — `.slnx` over `.sln` — and
+`Build` prefers a solution in the repository root — a `.slnx` or `.sln` — and
 hands MSBuild that one file; with no solution there it runs once per directory
-in `Sources.Build`. A configured runtime reaches the projects the same way in
+in `Sources.Build`. More than one solution there, whatever the mix of
+extensions, fails the target, naming each, since nothing says which one is
+meant. A configured runtime reaches the projects the same way in
 either case (§5.3).
 
 `Lint` runs one `fsharplint` job per project concurrently and prints each job's
@@ -387,8 +391,8 @@ returns exit code 1 on a failed build either way.
 
 ### 5.6 Solution file generation
 
-`Solution.current` (§3, the `Build` target) only *chooses among* `.slnx`/`.sln`
-files that already exist. The `Solution` target complements it by *generating*
+`Solution.current` (§3, the `Build` target) only *finds* the `.slnx`/`.sln`
+file that already exists. The `Solution` target complements it by *generating*
 `<Project.Name>.slnx`, so a fresh consumer gets a working IDE solution without
 hand-authoring it.
 
@@ -419,8 +423,8 @@ hand-authoring it.
   than a fixed generic filename.
 - If `Solution.current` (§3) finds a *different* file already at the repo
   root — a differently named `.slnx`, or any `.sln` — the target warns before
-  writing: two solution files leaves `Build`'s pick between them unspecified,
-  so at most one should stay committed.
+  writing: `Build` fails on more than one solution, so at most one should
+  stay committed.
 
 Out of scope: preserving manual `<Folder>` reshuffling or other hand edits
 across a regeneration — a rerun always replaces the file's content wholesale.
@@ -469,7 +473,6 @@ let defaultLibrary: ProjectSpec =
         ReleaseDir = "release"
         LibrarySources = sources
         TestsSources = !! "tests/*.fsproj"
-        BuildSources = sources ++ "tests/*.fsproj"
         Organization = None
         NugetApi = NugetApi.NotUsed
         NugetCustomServerRepository = None

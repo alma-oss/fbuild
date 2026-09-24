@@ -70,15 +70,26 @@ let execOk workDir exe args = execWithOk [] workDir exe args
 let private ignored =
     set [ "bin"; "obj"; "node_modules"; "deploy"; "output"; "release"; "dist"; "app"; ".git" ]
 
-let rec private copyInto (source: string) (target: string) =
-    Directory.CreateDirectory target |> ignore
+[<TailCall>]
+let rec private copyAll pending =
+    match pending with
+    | [] -> ()
+    | (source: string, target: string) :: rest ->
+        Directory.CreateDirectory target |> ignore
 
-    for file in Directory.GetFiles source do
-        File.Copy (file, Path.Combine (target, Path.GetFileName file), true)
+        for file in Directory.GetFiles source do
+            File.Copy (file, Path.Combine (target, Path.GetFileName file), true)
 
-    for dir in Directory.GetDirectories source do
-        let name = Path.GetFileName dir
-        if not (ignored.Contains name) then copyInto dir (Path.Combine (target, name))
+        let children =
+            Directory.GetDirectories source
+            |> Seq.map (fun dir -> dir, Path.GetFileName dir)
+            |> Seq.filter (snd >> ignored.Contains >> not)
+            |> Seq.map (fun (dir, name) -> dir, Path.Combine (target, name))
+            |> List.ofSeq
+
+        copyAll (children @ rest)
+
+let private copyInto (source: string) (target: string) = copyAll [ source, target ]
 
 /// Intermediate and output paths for the engine built through a fixture's project reference,
 /// isolated to that fixture copy: the scenarios run in parallel over one engine project.
