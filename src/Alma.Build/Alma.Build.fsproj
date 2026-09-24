@@ -25,6 +25,7 @@
         <Compile Include="Command.fs" />
         <Compile Include="Utils.fs" />
         <Compile Include="DotnetTools.fs" />
+        <Compile Include="Bootstrap.fs" />
         <Compile Include="Targets.fs" />
     </ItemGroup>
 
@@ -32,6 +33,12 @@
          through the FAKE-only generated AssemblyInfo, which a plain `dotnet test` never produces. -->
     <ItemGroup>
         <InternalsVisibleTo Include="Alma.Build.Tests" />
+    </ItemGroup>
+
+    <!-- Kept out of the `bootstrap/` glob because it is deployed only for a spec that selects a
+         runtime. -->
+    <ItemGroup>
+        <EmbeddedResource Include="runtime\Directory.Build.props" LogicalName="runtime/Directory.Build.props" />
     </ItemGroup>
 
     <!-- `bootstrap/` holds the support files; the repo carries symlinks to them because it is its

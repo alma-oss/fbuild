@@ -255,16 +255,23 @@ let private cleanup (dir: string) =
     if keepTemp then printfn $"FBUILD_KEEP_TEMP set, kept fixture copy: {dir}"
     else Directory.Delete (dir, true)
 
-/// Runs a target against a freshly prepared source-engine fixture and hands its directory to the
-/// assertion callback. Set `FBUILD_KEEP_TEMP` to keep the copy for inspection.
-let withFixture fixture (target: string) (assertArtifacts: string -> unit) =
+/// Runs a target against a freshly prepared source-engine fixture, handing the copy to `edit`
+/// before it and the directory to the assertion callback after it. Set `FBUILD_KEEP_TEMP` to keep
+/// the copy for inspection.
+let withEditedFixture fixture (edit: string -> unit) (target: string) (assertArtifacts: string -> unit) =
     let dir = prepare fixture
 
     try
+        edit dir
         execOk dir "dotnet" $"run --project build/build.fsproj -- {target}"
         assertArtifacts dir
     finally
         cleanup dir
+
+/// Runs a target against a freshly prepared source-engine fixture and hands its directory to the
+/// assertion callback.
+let withFixture fixture (target: string) (assertArtifacts: string -> unit) =
+    withEditedFixture fixture ignore target assertArtifacts
 
 /// Runs a target through the package-installed engine and its deployed build entrypoint.
 let withPackagedFixture fixture (target: string) (assertArtifacts: string -> unit) =

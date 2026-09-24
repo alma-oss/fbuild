@@ -1,9 +1,7 @@
 # Spec: fbuild — Versioned, Distributable F# Build Infrastructure
 
-> Status: **Implemented** at engine version `2.0.0`.
-> This document is the spec and the architecture reference for the repository.
-> It describes the current state — not history. Section 12 tracks what is
-> unresolved.
+> Spec and architecture reference for the repository. Describes the current
+> state; §12 tracks what is unresolved.
 
 ## 1. Objective
 
@@ -106,8 +104,8 @@ Targets are defined in `src/Alma.Build/Targets.fs`. Shared targets: `Info`,
 `Publish`, `ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
 
 `Bootstrap` sits outside every chain: run explicitly, it extracts the support
-files bundled in the engine assembly into the working directory and renders
-`.config/dotnet-tools.json` for the project spec (§5.4).
+files bundled in the engine assembly into the working directory and writes the
+files that follow from the project spec (§5.4).
 
 | Spec | Chain |
 | --- | --- |
@@ -118,6 +116,16 @@ files bundled in the engine assembly into the working directory and renders
 
 Build arguments: `no-clean` skips `Clean`; `no-lint` skips `Lint`. Default
 target when none is given is `Build`, for every spec case.
+
+`AssemblyInfo` and `Build` work from `Sources.Build`, which covers the
+consumer's own projects; `build.sh` has already built `build/build.fsproj`
+before any target runs, so the harness is not one of them. `Lint` adds
+`build/*.fsproj` back on top of that set.
+
+`Build` prefers a solution in the repository root — `.slnx` over `.sln` — and
+hands MSBuild that one file; with no solution there it runs once per directory
+in `Sources.Build`. A configured runtime reaches the projects the same way in
+either case (§5.3).
 
 `Lint` runs one `fsharplint` job per project concurrently and prints each job's
 output as a single block once every job has finished (`GroupedByJob`, §5.5).
@@ -148,11 +156,16 @@ bootstrap/              # BOOTSTRAP ASSETS — embedded into the engine assembly
 
 src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
   RtkFilter.fs          #   internal — per-command output filters (§5.5)
-  Commands.fs           #   internal — command vocabulary, RTK transport,
+  Command.fs            #   internal — command vocabulary, RTK transport,
                         #   serial + parallel runners, failure-log tee
   Utils.fs              #   ProjectDefinition / Spec / Git / RuntimeTarget model,
                         #   Args, Solution, Nuget, Http, Github helpers
+  DotnetTools.fs        #   tool pins + `.config/dotnet-tools.json` rendering (§5.4)
+  Bootstrap.fs          #   internal — bundled-resource extraction, the deployed
+                        #   file table, and the Bootstrap deployment (§5.4)
   Targets.fs            #   the FAKE target graph for every project type
+  runtime/              #   embedded, deployed per spec (§5.4)
+    Directory.Build.props #  carries the RID into each project (§5.3)
   Alma.Build.fsproj     #   Version + metadata; embeds bootstrap/** as resources
   paket.references      #   FSharp.Core, FAKE, the Microsoft.Build.* cap — the packed nuspec's deps
 
@@ -185,6 +198,7 @@ paket.lock             # pinned versions
 build.sh               # entry point (deployed by Bootstrap)
 fsharplint.json        # deployed by Bootstrap
 .editorconfig          # deployed by Bootstrap
+Directory.Build.props  # deployed by Bootstrap, only when the spec selects a runtime
 build/
   build.fsproj         # imports Paket.Restore.targets
   paket.references     # Alma.Build
@@ -219,14 +233,16 @@ is mandatory across all build projects — there is no Paket-free variant.
 
 ### 5.2 Engine package — `Alma.Build`
 
-- Compiled engine (`RtkFilter.fs`, `Commands.fs`, `Utils.fs`, `DotnetTools.fs`,
-  `Targets.fs`).
+- Compiled engine (`RtkFilter.fs`, `Command.fs`, `Utils.fs`, `DotnetTools.fs`,
+  `Bootstrap.fs`, `Targets.fs`).
 - **Also carries the non-compiled assets** as embedded resources — the fsproj
   globs `bootstrap/**` with logical names that keep the relative path. The
   `Bootstrap` target extracts them into the consuming repo, which makes them
   **version-locked to the engine**: a version bump plus a `Bootstrap` run is
   what delivers a new lint config or entry point.
 - Semver, single source: `Version` in `src/Alma.Build/Alma.Build.fsproj`.
+- Distributed through public nuget.org — the production channel for every
+  consuming repo.
 - Escape hatches: override targets from `Build.fs` via `Spec.map*`, or vendor
   the engine source outright.
 
@@ -243,7 +259,7 @@ is mandatory across all build projects — there is no Paket-free variant.
 | `ConsoleApplication` | `Spec.defaultConsoleApplication runtimeTargets` | `RuntimeTargets`, `RuntimeMode = Portable`, `PublishSingleFile = true`, `ReleaseSource`, `ReleaseDir = ./dist` |
 | `SAFEStackApplication` | `Spec.defaultSAFEStackApplication templateVersion` | Shared/Server/Client + test paths, `DeployPath` |
 
-Every case implements `IProjectSources` (`Sources` / `Tests` / `All` globs) and
+Every case implements `IProjectSources` (`Sources` / `Tests` / `Build` globs) and
 each has a `Spec.map*` function for overriding fields from `Build.fs`.
 
 `NugetApi = NotUsed | AskForKey | Organization of name | KeyInEnvironment of
@@ -258,47 +274,74 @@ RaspberryPiHassioAddon | Custom of string`. The engine resolves targets to its i
 supplies the given target. Both `AutoDetect` and `Specific` must resolve to a RID listed in
 `RuntimeTargets`, or resolution fails with `UnsupportedRuntime`; only `Portable` skips this
 check. `ProjectSpec.RuntimeConfiguration` exposes this capability
-without making target initialization depend on a particular project-spec case. `Release`
-publishes every `RuntimeTargets` entry in parallel, each into its own intermediate directory
-so the targets do not overwrite one another's `obj/project.assets.json`. `PublishSingleFile`
-controls the `PublishSingleFile` MSBuild property for those self-contained releases.
+without making target initialization depend on a particular project-spec case.
+
+A resolved runtime reaches MSBuild as `-p:AlmaBuildRuntimeIdentifier`, which the deployed
+`Directory.Build.props` assigns to `RuntimeIdentifier` inside each project. `RuntimeIdentifier`
+itself cannot go on the command line: a solution build fails
+`_CheckForSolutionLevelRuntimeIdentifier` (`NETSDK1134`) whenever it is set and the check has no
+opt-out, and a command-line value — `-r` or `-p:RuntimeIdentifier` alike — is a global property
+no project can restate. MSBuild imports the props file into every project below it and not into
+the metaproject, so the solution carries no RID while every project of it does, and
+`$(RuntimeIdentifier)` keeps its ordinary meaning where projects read it: a consumer's own
+`Condition="'$(RuntimeIdentifier)' == '…'"` items still fire. `Build` uses the one spelling
+whether it hands MSBuild a solution or the projects of `Sources.Build`.
+
+`withRuntimeIdentifier` appends the property to `Build`, `Tests`, `Run`, and `WatchRun` only;
+`takesRuntimeIdentifier` is the predicate behind that and behind the guard: the property is
+inert until the props file translates it, so a build that resolved a RID and finds no
+`Directory.Build.props` fails up front, naming the `Bootstrap` target.
+
+The `Pack` and `Publish` commands behind `Release` and `Publish` never carry a configured RID: a
+console `Release` passes its own `-r` per runtime target, project-scoped, where `-r` is legal.
+`Release` publishes every `RuntimeTargets` entry in parallel, each into its own intermediate
+directory so the targets do not overwrite one another's `obj/project.assets.json`.
+`PublishSingleFile` controls the `PublishSingleFile` MSBuild property for those self-contained
+releases.
 
 ### 5.4 Bootstrap support files
 
 `build.sh`, `fsharplint.json`, `.editorconfig`, and `build/README.md` live in
 `bootstrap/` and are embedded into the engine assembly with their directory
-structure. The `Bootstrap` target globs the bundled resources and writes each
-into the consuming repo at its relative path, overwriting what is there and
-marking `*.sh` executable. The files are committed to the consumer, so a repo
-can diverge locally; the cost of diverging is that the next `Bootstrap` run
-overwrites the local edit.
+structure. The `Bootstrap` target takes the bundled resources under that prefix
+(`BundledResource`) and writes each into the consuming repo at its relative
+path, overwriting what is there and marking `*.sh` executable. The files are
+committed to the consumer, so a repo can diverge locally; the cost of diverging
+is that the next `Bootstrap` run overwrites the local edit.
 
 This repository consumes them through symlinks instead of copies — the repo is
 its own first consumer, so the checkout and the bundled payload cannot drift.
 
-`.config/dotnet-tools.json` is the one file `Bootstrap` writes that is not a
-bundled resource: its contents depend on the project spec, so it is rendered
-from `DotnetTools.tools`. Every spec gets `paket`, which `build.sh` restores
-before any target runs, and `dotnet-fsharplint`, which backs `Lint`;
+`Bootstrap` then walks `deployedFiles`, the files whose presence or contents
+follow from the project spec rather than from the `bootstrap/` glob. Each entry
+is a `DeployedFile` — a path plus a `ProjectSpec -> DeployedContents option`,
+where `None` keeps the file out of a repo that has no use for it and
+`DeployedContents` says whether the bytes are `Bundled` (streamed from a
+resource) or `Rendered` (text computed from the spec).
+
+Two files are deployed this way. `.config/dotnet-tools.json` is `Rendered` from
+`DotnetTools.tools` for every spec: all of them get `paket`, which `build.sh`
+restores before any target runs, and `dotnet-fsharplint`, which backs `Lint`;
 `SAFEStackApplication` also gets `fable`, which `SafeClean`, `Bundle`, `Run` and
 `WatchTests` invoke, and `femto`, which syncs the npm side of the SAFE template.
-Like the bundled files it is overwritten, so a tool added by hand is lost on the
-next run.
+`Directory.Build.props` is `Bundled`, and only for a spec whose `RuntimeMode`
+resolves to a runtime at all — every mode but `Portable` (§5.3). Like the
+bundled files both are overwritten, so a tool or a property added by hand is
+lost on the next run.
 
-Both modules live in `src/Alma.Build/DotnetTools.fs`, which keeps the version
-pins in one obvious place. The manifest is serialised from a DTO by
+`DotnetTools` and `ToolsManifest` live in `src/Alma.Build/DotnetTools.fs`, which
+holds the version pins. The manifest is serialised from a DTO by
 `System.Text.Json` under `JsonNamingPolicy.CamelCase`, the casing the dotnet CLI
-expects for `version`, `isRoot` and `tools`. The tools themselves are a
-`Dictionary` rather than DTO fields, so each tool name is a key rather than a
-property: the naming policy leaves dictionary keys alone, and a name like
-`dotnet-fsharplint` is not a valid property name anyway. The dictionary is
-written in insertion order, so the manifest lists the tools in the order
-`DotnetTools.tools` declares them.
+expects for `version`, `isRoot` and `tools`. The tools are a `Dictionary`, so
+each tool name stays a verbatim key — the naming policy leaves dictionary keys
+alone, and `dotnet-fsharplint` is not a valid property name. Insertion order is
+preserved, so the manifest lists the tools in the order `DotnetTools.tools`
+declares them.
 
 ### 5.5 Command execution and output filtering
 
 No target shells out directly. Every external process goes through the
-`Commands` module as a typed `Command`:
+`Command` module as a typed `Command`:
 
 ```fsharp
 type Command =
@@ -353,7 +396,8 @@ project directly, so engine edits reach the self-host build on the next run with
 nothing to repack. Then run the suites that cover what changed (§8).
 
 **Release:** bump `Version` in `Alma.Build.fsproj` and `CHANGELOG.md`, merge,
-then push a `X.Y.Z` tag — `publish.yaml` packs and pushes from there.
+then push a `X.Y.Z` tag — `publish.yaml` packs and pushes to nuget.org from
+there.
 
 ## 7. Code style
 
@@ -378,10 +422,7 @@ let defaultLibrary: ProjectSpec =
         ReleaseDir = "release"
         LibrarySources = sources
         TestsSources = !! "tests/*.fsproj"
-        AllSources =
-            sources
-            ++ "tests/*.fsproj"
-            ++ "build/*.fsproj"
+        BuildSources = sources ++ "tests/*.fsproj"
         Organization = None
         NugetApi = NugetApi.NotUsed
         NugetCustomServerRepository = None
@@ -404,7 +445,8 @@ Conventions in force:
 - `orFail`/`failwith` are used deliberately in the build engine, where a failure
   must abort the build and no caller can handle an error.
 - Compile order is explicit in the `.fsproj` and is part of the design:
-  `RtkFilter → Commands → Utils → Targets`. `RtkFilter` and `Commands` are
+  `RtkFilter → Command → Utils → DotnetTools → Bootstrap → Targets`. `RtkFilter`,
+  `Command`, and most of `Bootstrap` are
   `internal`; the unit test assembly reaches them through
   `InternalsVisibleTo("Alma.Build.Tests")` on the engine project.
 
@@ -417,8 +459,9 @@ not mistaken for tests).
 **Unit — `tests/unit/`.** Covers the pure parts the rest of the engine is built
 on: the output filters (`RtkFilterTests`), the command vocabulary, transport
 selection, tee decision and trace compaction (`CommandTests`), runtime resolution
-(`UtilsTests`), and runtime command construction (`TargetsTests`). Fast, spawns no
-processes.
+(`UtilsTests`), the tool pins and manifest rendering (`DotnetToolsTests`), the
+deployed-file table (`BootstrapTests`), and runtime command construction
+(`TargetsTests`). Fast, spawns no processes.
 
 **Integration — `tests/integration/`.** One or more independent cases exercise each
 `ProjectSpec` shape. Each case copies its checked-in fixture repo out of
@@ -427,14 +470,22 @@ runnable consumer repo (a generated `build.fsproj`, `git init`, then the engine'
 own `Bootstrap` target for the support files), drives the requested target
 through the engine's own entry point, and asserts its behavior. `Bootstrap` runs
 before `dotnet tool restore`, since it renders the manifest the restore reads, so
-no fixture carries a `.config/dotnet-tools.json` of its own. Generated project references
+no fixture carries a `.config/dotnet-tools.json` — or a `Directory.Build.props` —
+of its own; both arrive from the target under test. A case can hand the prepared
+copy to an edit callback before the target runs (`withEditedFixture`), which is how
+one fixture covers both shapes a target branches on. Generated project references
 give every fixture copy isolated engine `bin`/`obj` paths, so cases can run concurrently:
 
 | Fixture | Target | Asserted |
 | --- | --- | --- |
 | `library` | `Release` | a `.nupkg` in `release/` |
+| `library-root` | `Release` | a `.nupkg` in `release/` when the project shares the root with a solution |
 | `executable` | `Release` | `app/test.executable.dll` |
 | `console` | `Release` | Linux x64 and macOS x64/arm64 archives, each holding the single-file executable |
+| `console` | `Build` | every project of the solution built under its runtime, nothing in the runtime-agnostic output |
+| `console`, solution deleted | `Build` | the same, with `Build` fanning out per project directory |
+| `console` | `Bootstrap` | `Directory.Build.props` deployed |
+| `library` | `Bootstrap` | no `Directory.Build.props` deployed |
 | `safe` | `Bundle` | a server `.dll` in `deploy/`, an `.html` in `deploy/public/` |
 
 Landing on the terminal target pulls the whole chain (`AssemblyInfo`, `Build`,
@@ -472,8 +523,8 @@ cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 
 - Keep `Alma.Build.fsproj` `Version`, `CHANGELOG.md`, and
   `paket.dependencies` consistent in the same change.
-- Run the integration tests after changing `Targets.fs` — the unit suite does
-  not execute a single target.
+- Run the integration tests after changing `Targets.fs` or `Bootstrap.fs` — the
+  unit suite does not execute a single target.
 - Run the `packaged engine` filtered case after changing packaging, the
   package `Version`, or the bootstrap assets.
 - Edit the bootstrap assets under `bootstrap/`; they are the single source
@@ -504,28 +555,19 @@ cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 - [x] A repo following the adoption steps in `README.md` builds with `./build.sh`.
 - [x] Every spec case is covered by an automated end-to-end check — the nightly
       integration tests.
-- [ ] A feed consuming repos can resolve `Alma.Build` from is wired up and
-      reachable from CI and dev machines.
-- [ ] `Publish` has been exercised against that feed. The self-host build is
-      configured for it (`NugetApi.KeyInEnvironment "NUGET_API_KEY"`, pushed by
-      `publish.yaml` on a version tag), but no tag has been cut yet.
+- [x] Consuming repos can resolve `Alma.Build` — it is published to nuget.org,
+      reachable from CI and dev machines alike.
+- [x] `Publish` has been exercised against that feed.
 
 ## 11. Roadmap
 
-1. **Phase 0 (done)** — package the engine, self-host it, deploy the bootstrap
-   files through `Bootstrap`, cover every spec case with end-to-end integration tests.
-2. **Phase 1 (~10 repos)** — publish to a feed, onboard a few representative
-   repos per project type, fix friction found on real code.
-3. **Phase 2 (50–100 repos)** — Renovate for pull-based bumps, a migration
+1. **Phase 1 (~10 repos)** — onboard a few representative repos per project
+   type, fix friction found on real code.
+2. **Phase 2 (50–100 repos)** — Renovate for pull-based bumps, a migration
    catalog, monitoring.
 
 ## 12. Open questions and risks
 
-- **No feed carries the package yet.** `publish.yaml` is wired to push to
-  nuget.org on a version tag, but no version has been published, so no consuming
-  repository can resolve `Alma.Build` at all. Whether the production channel
-  stays public nuget.org or moves to an internal feed, and the auth model if it
-  moves, is unresolved.
 - **Vendoring has no drift detection.** Nothing records which version a repo's
   `build.sh` or `fsharplint.json` came from, and `Bootstrap` overwrites
   unconditionally, so a locally edited asset is silently clobbered on the next

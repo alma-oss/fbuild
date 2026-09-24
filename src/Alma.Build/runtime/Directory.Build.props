@@ -1,0 +1,9 @@
+<Project>
+
+  <!-- Deployed by Alma.Build; the next Bootstrap overwrites it. The build cannot set
+       `RuntimeIdentifier` from the command line, so it passes `AlmaBuildRuntimeIdentifier` instead. -->
+  <PropertyGroup Condition="'$(AlmaBuildRuntimeIdentifier)' != ''">
+    <RuntimeIdentifier>$(AlmaBuildRuntimeIdentifier)</RuntimeIdentifier>
+  </PropertyGroup>
+
+</Project>
