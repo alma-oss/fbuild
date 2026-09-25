@@ -3,6 +3,7 @@
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
 
+## 3.0.0 - 2026-09-25
 - `FSharp.Core` is now declared as a dependency of the packed engine. A consumer whose `Build` group lock already held an older FSharp.Core kept it across `paket install`, and the engine failed to load at startup.
 - `Microsoft.Build.Framework`, `Microsoft.Build.Utilities.Core`, and `Microsoft.NET.StringTools` are capped below 18.10, the release that moved them to `net11.0`. The cap ships through the nuspec, so consumer build projects stop warning about an unsupported target framework.
 - `Bootstrap` now renders `.config/dotnet-tools.json` from the project spec.
