@@ -6,16 +6,20 @@ open System.Diagnostics
 
 // ---- Repo layout ----
 
-let root =
-    let rec find (dir: string) =
-        if File.Exists (Path.Combine (dir, "fbuild.slnx")) then dir
-        else find (Directory.GetParent(dir).FullName)
+let private engineProjectPath = Path.Combine ("src", "Alma.Build", "Alma.Build.fsproj")
 
-    find AppDomain.CurrentDomain.BaseDirectory
+let root =
+    let rec find (dir: DirectoryInfo) =
+        match dir with
+        | null -> failwith $"No ancestor of {AppDomain.CurrentDomain.BaseDirectory} contains {engineProjectPath}"
+        | dir when File.Exists (Path.Combine (dir.FullName, engineProjectPath)) -> dir.FullName
+        | dir -> find dir.Parent
+
+    find (DirectoryInfo AppDomain.CurrentDomain.BaseDirectory)
 
 /// Fixtures reference the engine straight from source, so the integration tests exercise whatever is
 /// checked out — no repack step between an engine edit and the test seeing it.
-let engineProject = Path.Combine (root, "src", "Alma.Build", "Alma.Build.fsproj")
+let engineProject = Path.Combine (root, engineProjectPath)
 
 let fixtures = Path.Combine (root, "tests", "integration", "fixtures")
 
