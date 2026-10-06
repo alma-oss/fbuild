@@ -316,6 +316,18 @@ let withEditedFixture fixture (edit: string -> unit) (target: string) (assertArt
     finally
         cleanup dir
 
+/// Runs a target expected to fail against a freshly prepared source-engine fixture, handing the copy
+/// to `edit` before it and the run's exit code and combined output to the assertion callback after it.
+let withFailingEditedFixture fixture (edit: string -> unit) (target: string) (assertFailure: int -> string -> unit) =
+    let dir = prepare fixture
+
+    try
+        edit dir
+        let code, out, err = exec dir "dotnet" $"run --project build/build.fsproj -- {target}"
+        assertFailure code (out + err)
+    finally
+        cleanup dir
+
 /// Runs a target against a freshly prepared source-engine fixture and hands its directory to the
 /// assertion callback.
 let withFixture fixture (target: string) (assertArtifacts: string -> unit) =

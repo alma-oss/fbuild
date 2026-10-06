@@ -111,7 +111,7 @@ module Targets =
 
                 [
                     toJob (JobName "server") (Dotnet Tests) [] safe.ServerTestsPath
-                    //toJob (JobName "client") (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientTestsPath
+                    toJob (JobName "client") (Dotnet Fable) [ "-o"; "output"; "-s"; "--run"; "npx"; "mocha"; "output" ] safe.ClientTestsPath
                 ]
                 |> runParallel
             )
