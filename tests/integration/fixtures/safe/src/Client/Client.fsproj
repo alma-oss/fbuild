@@ -6,12 +6,12 @@
     <ItemGroup>
         <None Include="index.html" />
         <None Include="vite.config.mts" />
+        <None Include="roundtrip.mjs" />
+        <Compile Include="RoundTrip.fs" />
         <Compile Include="App.fs" />
     </ItemGroup>
     <ItemGroup>
         <ProjectReference Include="../Shared/Shared.fsproj" />
     </ItemGroup>
-    <ItemGroup>
-        <PackageReference Include="Fable.Core" Version="4.5.0" />
-    </ItemGroup>
+    <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

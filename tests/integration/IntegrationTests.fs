@@ -154,6 +154,10 @@ let integrationTests =
                 (anyFile dir "deploy/public" "*.html")
                 "Bundle should build the client bundle into deploy/public/")
 
+        fixtureTest Safe "Bundle" "should round-trip a record through the remoting API when a SAFE application is bundled" (fun dir ->
+            withServer (Path.Combine (dir, "deploy")) "Server.dll" (fun url ->
+                execOk (Path.Combine (dir, "src", "Client")) "node" $"roundtrip.mjs {url}"))
+
         testCase "should release a library through the packaged engine" <| fun () ->
             withPackagedFixture Library "Release" (fun dir ->
                 Expect.isTrue

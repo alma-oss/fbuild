@@ -21,7 +21,7 @@ module DotnetTools =
     let private safeStackTools = [
         {
             Name = "fable"
-            Version = "5.13.0"
+            Version = "5.0.0"
             Commands = [ "fable" ]
         }
         {

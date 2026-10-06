@@ -67,6 +67,34 @@ let execWithOk env workDir exe args =
 
 let execOk workDir exe args = execWithOk [] workDir exe args
 
+/// Starts the ASP.NET Core application `assembly` from `workDir` on a free loopback port and hands its
+/// base URL to `useServer`, stopping it afterwards. The URL is read from Kestrel's startup log, so
+/// every log category but the host lifetime is silenced to keep that line the only output.
+let withServer (workDir: string) (assembly: string) (useServer: string -> unit) =
+    let psi = ProcessStartInfo ("dotnet", assembly)
+    psi.WorkingDirectory <- workDir
+    psi.RedirectStandardOutput <- true
+    psi.RedirectStandardError <- true
+    psi.UseShellExecute <- false
+    psi.Environment["ASPNETCORE_URLS"] <- "http://127.0.0.1:0"
+    psi.Environment["Logging__LogLevel__Default"] <- "Warning"
+    psi.Environment["Logging__LogLevel__Microsoft.Hosting.Lifetime"] <- "Information"
+
+    use server = Process.Start psi
+
+    let listeningOn = "Now listening on: "
+
+    let rec awaitUrl () =
+        match server.StandardOutput.ReadLine () with
+        | null -> failwith $"{assembly} exited before listening:\n{server.StandardError.ReadToEnd ()}"
+        | line when line.Contains listeningOn -> line.Substring(line.IndexOf listeningOn + listeningOn.Length).Trim ()
+        | _ -> awaitUrl ()
+
+    try
+        awaitUrl () |> useServer
+    finally
+        server.Kill true
+
 // ---- Fixture preparation ----
 
 /// Build artifacts a previous local run may have left in the checked-in fixture. Copying them
@@ -133,7 +161,8 @@ let private restoreLock = obj ()
 /// Copies a checked-in fixture to a throwaway directory and completes it into a runnable consumer
 /// repo: the `build.fsproj` carrying the absolute engine path and isolated output paths, a git repo,
 /// which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`, and the
-/// support files, deployed by the engine's own `Bootstrap` target.
+/// support files, deployed by the engine's own `Bootstrap` target. A fixture declaring its packages
+/// through Paket is restored the way the deployed `build.sh` restores it.
 ///
 /// `Bootstrap` runs before `dotnet tool restore` because it renders the tools manifest the restore
 /// reads. Lint then runs under the shipped ruleset rather than fsharplint's defaults, and the tool
@@ -154,7 +183,11 @@ let private prepare fixture =
     execOk dir "git" "init"
     execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
     execOk dir "dotnet" "run --project build/build.fsproj -- Bootstrap"
-    lock restoreLock (fun () -> execOk dir "dotnet" "tool restore")
+    lock restoreLock (fun () ->
+        execOk dir "dotnet" "tool restore"
+
+        if File.Exists (Path.Combine (dir, "paket.dependencies")) then
+            execOk dir "dotnet" "paket restore")
 
     dir
 
