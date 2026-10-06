@@ -33,6 +33,9 @@ Common targets (`Library` spec):
 - `Publish`
 - `Info`
 
+For a `SAFEStackApplication`, `Tests` also runs the Fable.Mocha client tests in `tests/Client`
+under `mocha`, so `package.json` needs `mocha` in its `devDependencies`.
+
 `Bootstrap` and `Solution` sit outside the chain — run them explicitly. `Solution`
 generates `<Project.Name>.slnx` at the repo root from the project's declared source
 and test projects, overwriting it on every run — like `Bootstrap`, rerun it whenever

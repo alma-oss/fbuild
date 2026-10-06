@@ -60,7 +60,8 @@ Versioned off a single source of truth: `Version` in
 - **bash** and **git** — required at build time (`build.sh`, and `Git.init`
   shells out to `git rev-parse`).
 - **Node/npm** — required by the SAFE-stack project type, and therefore by the
-  integration tests' `safe` fixture.
+  integration tests' `safe` fixture. The consumer's `package.json` has to carry
+  `mocha` as a dev dependency: `Tests` runs the Fable.Mocha client tests under it.
 - **RTK** (optional) — when `RTK_ACTIVE` is set the engine routes commands
   through `rtk` and compacts their output; see §5.5. Absent, output is
   byte-identical to a direct spawn.
@@ -139,6 +140,11 @@ either case (§5.3).
 output as a single block once every job has finished (`GroupedByJob`, §5.5).
 The SAFE targets pair a server job with a client job and run them with live
 interleaved output (`Bundle`, `Run`, `RunMirrord`, `Tests`, `WatchTests`).
+SAFE `Tests` runs the Expecto server tests in `tests/Server` and compiles
+`tests/Client` with Fable into `tests/Client/output`, then runs the top-level
+modules there with `npx mocha`; Fable.Mocha registers its tests with mocha
+outside a browser, so a failing client test fails the target. `WatchTests`
+serves the client tests in the browser through vite instead.
 Every other target is serial.
 
 ## 4. Project structure
@@ -330,8 +336,8 @@ resource) or `Rendered` (text computed from the spec).
 Two files are deployed this way. `.config/dotnet-tools.json` is `Rendered` from
 `DotnetTools.tools` for every spec: all of them get `paket`, which `build.sh`
 restores before any target runs, and `dotnet-fsharplint`, which backs `Lint`;
-`SAFEStackApplication` also gets `fable`, which `SafeClean`, `Bundle`, `Run` and
-`WatchTests` invoke, and `femto`, which syncs the npm side of the SAFE template.
+`SAFEStackApplication` also gets `fable`, which `SafeClean`, `Bundle`, `Run`,
+`Tests` and `WatchTests` invoke, and `femto`, which syncs the npm side of the SAFE template.
 `fable` stays at 5.0.0: 5.4.0 compiles a `Fable.Remoting.Client` proxy that
 encodes options as unions the server cannot decode, and 5.13.0 fails to compile
 `Fable.Remoting.MsgPack`. The `safe` fixture's round-trip case guards a bump.

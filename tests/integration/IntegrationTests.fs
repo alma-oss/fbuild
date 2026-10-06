@@ -20,6 +20,9 @@ let private fixtureRunTwiceTest setup target label assertArtifacts =
 let private editedFixtureTest setup edit target label assertArtifacts =
     testCase label <| fun () -> withEditedFixture setup edit target assertArtifacts
 
+let private failingFixtureTest setup edit target label assertFailure =
+    testCase label <| fun () -> withFailingEditedFixture setup edit target assertFailure
+
 let private fileExists (dir: string) (relative: string) = File.Exists (Path.Combine (dir, relative))
 
 let private anyFile (dir: string) (relative: string) (pattern: string) =
@@ -147,6 +150,22 @@ let integrationTests =
             Expect.isFalse
                 (fileExists dir "Directory.Build.props")
                 "A spec that selects no runtime should not receive the props")
+
+        fixtureTest Safe "Tests" "should run the client tests when a SAFE application is tested" (fun dir ->
+            Expect.isTrue
+                (fileExists dir "tests/Client/output/Client.Tests.js")
+                "Tests should compile the client tests with Fable before running them")
+
+        failingFixtureTest
+            Safe
+            (fun dir ->
+                let tests = Path.Combine (dir, "tests", "Client", "Client.Tests.fs")
+                File.WriteAllText (tests, (File.ReadAllText tests).Replace ("Expect.equal 1 1", "Expect.equal 1 2")))
+            "Tests"
+            "should fail the build when a SAFE application's client test fails"
+            (fun code output ->
+                Expect.notEqual code 0 "A failing client test should fail the Tests target"
+                Expect.stringContains output "Fixture assertion must pass" "The failing client test's message should be reported")
 
         fixtureTest Safe "Bundle" "should publish the server and client when a SAFE application is bundled" (fun dir ->
             Expect.isTrue (anyFile dir "deploy" "*.dll") "Bundle should publish the server into deploy/"
