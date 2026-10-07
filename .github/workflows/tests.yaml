@@ -1,10 +1,10 @@
 name: Tests
 
 on:
-  #push:
   pull_request:
+  workflow_dispatch:
   schedule:
-      -   cron:  '0 3 * * *'
+    - cron:  '0 3 * * *'
 
 jobs:
   tests:
@@ -35,14 +35,5 @@ jobs:
         with:
           node-version: 24
 
-      - name: Lint and unit tests
-        if: github.event_name == 'pull_request'
-        run: |
-          ${{ matrix.os.run }} -t Lint
-          dotnet run --project tests/unit/unit.fsproj --
-
-      # The integration matrix runs a full target graph per spec case — minutes of work, and
-      # dependent on npm and the NuGet feeds, so it runs nightly instead of on every pull request.
       - name: Lint, unit tests and integration matrix
-        if: github.event_name != 'pull_request'
         run: ${{ matrix.os.run }} -t Tests

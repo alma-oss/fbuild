@@ -1,0 +1,13 @@
+framework: net10.0
+storage: none
+
+source https://api.nuget.org/v3/index.json
+
+nuget FSharp.Core ~> 10.1
+
+nuget Fable.Core ~> 4.5
+nuget Fable.Remoting.Client ~> 8.0
+nuget Fable.Remoting.AspNetCore ~> 3.1
+
+nuget Expecto ~> 10.2
+nuget Fable.Mocha ~> 2.17

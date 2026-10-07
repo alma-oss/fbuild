@@ -2,6 +2,8 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- Downgrade `fable` tool to 5.0.0 for SAFE-stack projects
+  - With `Fable.Remoting.Client`, 5.4.0 sends records the server cannot read and 5.13.0 fails to compile the client. Rerun `Bootstrap` and commit `.config/dotnet-tools.json`.
 
 ## 3.0.0 - 2026-09-25
 - `FSharp.Core` is now declared as a dependency of the packed engine. A consumer whose `Build` group lock already held an older FSharp.Core kept it across `paket install`, and the engine failed to load at startup.

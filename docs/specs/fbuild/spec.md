@@ -332,6 +332,9 @@ Two files are deployed this way. `.config/dotnet-tools.json` is `Rendered` from
 restores before any target runs, and `dotnet-fsharplint`, which backs `Lint`;
 `SAFEStackApplication` also gets `fable`, which `SafeClean`, `Bundle`, `Run` and
 `WatchTests` invoke, and `femto`, which syncs the npm side of the SAFE template.
+`fable` stays at 5.0.0: 5.4.0 compiles a `Fable.Remoting.Client` proxy that
+encodes options as unions the server cannot decode, and 5.13.0 fails to compile
+`Fable.Remoting.MsgPack`. The `safe` fixture's round-trip case guards a bump.
 `Directory.Build.props` is `Bundled`, and only for a spec whose `RuntimeMode`
 resolves to a runtime at all — every mode but `Portable` (§5.3). Like the
 bundled files both are overwritten, so a tool or a property added by hand is
@@ -520,7 +523,9 @@ own `Bootstrap` target for the support files), drives the requested target
 through the engine's own entry point, and asserts its behavior. `Bootstrap` runs
 before `dotnet tool restore`, since it renders the manifest the restore reads, so
 no fixture carries a `.config/dotnet-tools.json` — or a `Directory.Build.props` —
-of its own; both arrive from the target under test. A case can hand the prepared
+of its own; both arrive from the target under test. A fixture carrying a
+`paket.dependencies` — `safe` does, with its own `paket.lock` — is then restored
+through `paket restore`, as the deployed `build.sh` would. A case can hand the prepared
 copy to an edit callback before the target runs (`withEditedFixture`), which is how
 one fixture covers both shapes a target branches on. Generated project references
 give every fixture copy isolated engine `bin`/`obj` paths, so cases can run concurrently:
@@ -540,6 +545,7 @@ give every fixture copy isolated engine `bin`/`obj` paths, so cases can run conc
 | `library-root` | `Solution` | differently named checked-in solution left alone; own `.slnx` generated alongside it |
 | `library` | `Solution` run twice | second run regenerates identical content, no second file |
 | `safe` | `Bundle` | a server `.dll` in `deploy/`, an `.html` in `deploy/public/` |
+| `safe` | `Bundle` | the published server, started on a free port, echoes a record of a single-case DU, a union with fields, options, `int64`, `decimal`, list, `Map`, tuple and `Result` back to the Fable-compiled `Fable.Remoting.Client` proxy run under Node; the server and the client each compare it to the shared sample |
 
 Landing on the terminal target pulls the whole chain (`AssemblyInfo`, `Build`,
 `Lint`, `Tests`) with it. Fixtures reference the engine **from source**, so the

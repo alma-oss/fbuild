@@ -9,7 +9,5 @@
     <ItemGroup>
         <ProjectReference Include="../../src/Shared/Shared.fsproj" />
     </ItemGroup>
-    <ItemGroup>
-        <PackageReference Include="Expecto" Version="10.2.1" />
-    </ItemGroup>
+    <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

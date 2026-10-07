@@ -1,11 +1,13 @@
 {
     "private": true,
+    "type": "module",
     "dependencies": {
         "react": "^18.3.1",
         "react-dom": "^18.3.1"
     },
     "devDependencies": {
         "@vitejs/plugin-react": "^4.3.4",
-        "vite": "^6.1.0"
+        "vite": "^6.1.0",
+        "xhr2": "^0.2.1"
     }
 }
