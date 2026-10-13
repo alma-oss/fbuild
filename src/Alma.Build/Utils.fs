@@ -173,6 +173,35 @@ module Utils =
                 |> sprintf "Found several solutions (%s); keep only one committed so the build knows which to use."
 
     [<RequireQualifiedAccess>]
+    type SolutionFileNameError =
+        | NothingUsable of projectName: string
+
+    [<RequireQualifiedAccess>]
+    module SolutionFileNameError =
+        let format = function
+            | SolutionFileNameError.NothingUsable projectName ->
+                sprintf "Project name %A leaves no usable solution file name once whitespace and path-unsafe characters are dropped." projectName
+
+    /// A `.slnx` file name derived from a project name, safe to check out on any OS.
+    type SolutionFileName = private SolutionFileName of string
+
+    [<RequireQualifiedAccess>]
+    module SolutionFileName =
+        // Fixed across OSes: the generated name must also check out on Windows, whichever OS ran the target.
+        let private unsafeChars = set [ '/'; '\\'; ':'; '*'; '?'; '"'; '<'; '>'; '|' ]
+
+        /// `<projectName>.slnx` with whitespace, control and path-unsafe characters dropped and trailing dots trimmed.
+        let create (projectName: string): Result<SolutionFileName, SolutionFileNameError> =
+            projectName
+            |> String.filter (fun c -> not (Char.IsWhiteSpace c || Char.IsControl c || unsafeChars.Contains c))
+            |> fun name -> name.TrimEnd '.'
+            |> function
+                | "" -> Error (SolutionFileNameError.NothingUsable projectName)
+                | name -> Ok (SolutionFileName (sprintf "%s.slnx" name))
+
+        let value (SolutionFileName fileName) = fileName
+
+    [<RequireQualifiedAccess>]
     module Solution =
         open System.Xml.Linq
 
@@ -199,6 +228,17 @@ module Utils =
             IO.Path.GetRelativePath(forwardSlashed root, forwardSlashed path) |> forwardSlashed
 
         /// `.slnx` contents for the given forward-slashed relative project paths; `None` when there are none.
+        let private sameContents (expected: string) (actual: string): bool =
+            let normalized (value: string) = value.Replace("\r\n", "\n").TrimEnd ()
+
+            normalized expected = normalized actual
+
+        /// Splits `(path, contents)` pairs into those matching `rendered`, ignoring line endings and trailing whitespace, and the rest.
+        let internal partitionSuperseded (rendered: string) (others: (string * string) list): string list * string list =
+            let superseded, differing = others |> List.partition (snd >> sameContents rendered)
+
+            superseded |> List.map fst, differing |> List.map fst
+
         let internal render (projects: seq<string>): string option =
             let topLevelDirectory (path: string) =
                 match path.IndexOf '/' with
@@ -232,6 +272,38 @@ module Utils =
             match folders @ rootProjects with
             | [] -> None
             | children -> Some (XElement(XName.Get "Solution", children).ToString() + "\n")
+
+        /// Writes `fileName` at `root` from `projects`, deleting other root solutions with the same contents and warning about the rest.
+        let internal generate (root: string) (fileName: SolutionFileName) (projects: seq<string>): unit =
+            let path = fileName |> SolutionFileName.value
+            let rendered = projects |> Seq.map (relativeTo root) |> render
+            let others = all () |> List.filter (fun other -> Path.GetFullPath other <> Path.GetFullPath path)
+
+            let superseded, differing =
+                match rendered with
+                | Some content -> others |> List.map (fun other -> other, File.ReadAllText other) |> partitionSuperseded content
+                | None -> [], others
+
+            // Deleted before writing: on a case-insensitive filesystem a superseded name differing only in case is the target file itself.
+            superseded
+            |> List.iter (fun other ->
+                File.Delete other
+                Trace.tracefn "Deleted %s, superseded by %s" (relativeTo root other) path
+            )
+
+            match differing with
+            | [] -> ()
+            | others ->
+                Trace.traceImportantfn
+                    "%s already sits at the repo root alongside %s; keep only one committed, since Build fails on more than one solution."
+                    (others |> List.map (relativeTo root) |> String.concat ", ")
+                    path
+
+            match rendered with
+            | Some content ->
+                File.WriteAllText(path, content)
+                Trace.tracefn "Wrote %s" path
+            | None -> Trace.tracefn "No projects to render into a solution; nothing written."
 
     [<RequireQualifiedAccess>]
     module Nuget =

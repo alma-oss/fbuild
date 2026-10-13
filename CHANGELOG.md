@@ -2,6 +2,7 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- `Solution` drops whitespace and characters that are not safe in a file name from the project name, so `My Project` generates `MyProject.slnx`. A project name with nothing usable left fails the target. Another solution at the repo root whose contents match the generated one is deleted, so rerunning `Solution` migrates an old-named file by itself; commit the rename. A solution with different contents is kept and warned about, as before.
 - Downgrade `fable` tool to 5.0.0 for SAFE-stack projects
   - With `Fable.Remoting.Client`, 5.4.0 sends records the server cannot read and 5.13.0 fails to compile the client. Rerun `Bootstrap` and commit `.config/dotnet-tools.json`.
 

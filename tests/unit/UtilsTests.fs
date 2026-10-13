@@ -46,6 +46,88 @@ let solutionPickTests =
     ]
 
 [<Tests>]
+let solutionFileNameCreateTests =
+    testList "SolutionFileName.create" [
+        test "should keep the name with inner dots when it holds nothing unsafe" {
+            let result = "Alma.Build" |> SolutionFileName.create |> Result.map SolutionFileName.value
+
+            Expect.equal result (Ok "Alma.Build.slnx") "a dotted name passes through"
+        }
+
+        test "should drop spaces, tabs and non-breaking spaces when the name holds them" {
+            let result = "My\tGreat\u00A0Project App" |> SolutionFileName.create |> Result.map SolutionFileName.value
+
+            Expect.equal result (Ok "MyGreatProjectApp.slnx") "every kind of whitespace is dropped"
+        }
+
+        test "should drop path separators and Windows-reserved characters when the name holds them" {
+            let result = "a/b\\c:d*e?f\"g<h>i|j" |> SolutionFileName.create |> Result.map SolutionFileName.value
+
+            Expect.equal result (Ok "abcdefghij.slnx") "path-unsafe characters are dropped"
+        }
+
+        test "should drop control characters when the name holds them" {
+            let result = "Foo\u0001Bar" |> SolutionFileName.create |> Result.map SolutionFileName.value
+
+            Expect.equal result (Ok "FooBar.slnx") "control characters are dropped"
+        }
+
+        test "should trim trailing dots when the name ends in them" {
+            let result = "Foo. " |> SolutionFileName.create |> Result.map SolutionFileName.value
+
+            Expect.equal result (Ok "Foo.slnx") "a trailing dot Windows would strip is trimmed"
+        }
+
+        test "should keep non-ASCII letters when the name holds them" {
+            let result = "Hrabě" |> SolutionFileName.create |> Result.map SolutionFileName.value
+
+            Expect.equal result (Ok "Hrabě.slnx") "diacritics are valid in file names"
+        }
+
+        test "should return NothingUsable error when nothing is left after dropping" {
+            let result = "\t/. " |> SolutionFileName.create |> Result.map SolutionFileName.value
+
+            Expect.equal result (Error (SolutionFileNameError.NothingUsable "\t/. ")) "an empty name would write a hidden .slnx"
+        }
+    ]
+
+[<Tests>]
+let solutionPartitionSupersededTests =
+    testList "Solution.partitionSuperseded" [
+        test "should mark a solution superseded when its contents are identical" {
+            let rendered = "<Solution>\n  <Project Path=\"a\" />\n</Solution>\n"
+
+            let result = Solution.partitionSuperseded rendered [ "Old Name.slnx", rendered ]
+
+            Expect.equal result ([ "Old Name.slnx" ], []) "an identical solution is superseded"
+        }
+
+        test "should mark a solution superseded when only line endings and trailing whitespace differ" {
+            let rendered = "<Solution>\n  <Project Path=\"a\" />\n</Solution>\n"
+
+            let result = Solution.partitionSuperseded rendered [ "Old.slnx", "<Solution>\r\n  <Project Path=\"a\" />\r\n</Solution>" ]
+
+            Expect.equal result ([ "Old.slnx" ], []) "CRLF and a missing final newline do not make a solution differ"
+        }
+
+        test "should keep a solution differing when its project list differs" {
+            let rendered = "<Solution>\n  <Project Path=\"a\" />\n</Solution>\n"
+
+            let result = Solution.partitionSuperseded rendered [ "Other.slnx", "<Solution>\n  <Project Path=\"b\" />\n</Solution>\n" ]
+
+            Expect.equal result ([], [ "Other.slnx" ]) "a different project list is a different solution"
+        }
+
+        test "should split a mixed set when some match and some differ" {
+            let rendered = "<Solution />\n"
+
+            let result = Solution.partitionSuperseded rendered [ "a.slnx", rendered; "b.sln", "Microsoft Visual Studio Solution File" ]
+
+            Expect.equal result ([ "a.slnx" ], [ "b.sln" ]) "each solution is classified on its own"
+        }
+    ]
+
+[<Tests>]
 let solutionRelativeToTests =
     testList "Solution.relativeTo" [
         test "should strip the root and use forward slashes when the path uses backslashes" {
