@@ -190,22 +190,9 @@ module Targets =
         Target.create "Bootstrap" (fun _ -> Bootstrap.deploy definition.Specs)
 
         Target.create "Solution" (fun _ ->
-            let root = IO.Directory.GetCurrentDirectory ()
-            let path = sprintf "%s.slnx" definition.Project.Name
-
-            match Solution.all () |> List.filter (fun other -> IO.Path.GetFullPath other <> IO.Path.GetFullPath path) with
-            | [] -> ()
-            | others ->
-                Trace.traceImportantfn
-                    "%s already sits at the repo root alongside %s; keep only one committed, since Build fails on more than one solution."
-                    (others |> List.map (Solution.relativeTo root) |> String.concat ", ")
-                    path
-
-            match definition.Sources.Build |> Seq.map (Solution.relativeTo root) |> Solution.render with
-            | Some content ->
-                IO.File.WriteAllText(path, content)
-                Trace.tracefn "Wrote %s" path
-            | None -> Trace.tracefn "No projects to render into a solution; nothing written."
+            match definition.Project.Name |> SolutionFileName.create with
+            | Ok fileName -> definition.Sources.Build |> Solution.generate (IO.Directory.GetCurrentDirectory ()) fileName
+            | Error error -> error |> SolutionFileNameError.format |> failwith
         )
 
         Target.create "Clean" <| skipOn "no-clean" (fun _ ->

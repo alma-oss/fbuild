@@ -418,14 +418,27 @@ hand-authoring it.
   `dotnet build <solution>` recompile it.
 - An empty `Sources.Build` renders no file, and the target traces why, rather
   than overwriting a real solution with an empty `<Solution>`.
+- The file name comes from `SolutionFileName.create`: `Project.Name` with every
+  whitespace character (`Char.IsWhiteSpace`), control character, path
+  separator (`/`, `\`) and Windows-reserved character (`: * ? " < > |`)
+  dropped, and trailing dots trimmed. The character set is fixed, not taken
+  from the running OS, so the name checks out on Windows too. Letters outside
+  ASCII, inner dots and case are kept. A name with nothing left fails the
+  target with `SolutionFileNameError.NothingUsable` before anything is written.
 - Writes the result to `<Project.Name>.slnx` at the repo root, matching the
   naming convention this engine's own consumers already use by hand
   (`fbuild.slnx`, `TucConsole.slnx`, `localities-adminConsole.slnx`), rather
   than a fixed generic filename.
-- If `Solution.current` (§3) finds a *different* file already at the repo
-  root — a differently named `.slnx`, or any `.sln` — the target warns before
-  writing: `Build` fails on more than one solution, so at most one should
-  stay committed.
+- Every other `.slnx`/`.sln` already at the repo root (`Solution.all`, §3) is
+  compared with the rendered content by the internal `Solution.partitionSuperseded`,
+  which ignores line endings and trailing whitespace. A match is a stale copy
+  under an earlier name — for instance from before `SolutionFileName.create`
+  normalization — and is deleted before the new file is written; deleting
+  first keeps a case-insensitive filesystem, where a name differing only in
+  case is the target file itself, from losing the fresh write. Any other file
+  is left in place and the target warns: `Build` fails on more than one
+  solution, so at most one should stay committed. With no projects to
+  render, nothing is deleted and every other solution is warned about.
 
 Out of scope: preserving manual `<Folder>` reshuffling or other hand edits
 across a regeneration — a rerun always replaces the file's content wholesale.
