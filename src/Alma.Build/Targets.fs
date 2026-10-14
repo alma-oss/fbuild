@@ -212,7 +212,10 @@ module Targets =
                 let release =
                     definition.ChangeLog
                     |> Option.bind (fun changeLog ->
-                        try ReleaseNotes.parse (File.ReadAllLines changeLog |> Seq.filter ((<>) "## Unreleased")) |> Some
+                        let isVersionNotes (line: string) =
+                            line <> "## Unreleased" && not (line.StartsWith "###")
+
+                        try ReleaseNotes.parse (File.ReadAllLines changeLog |> Seq.filter isVersionNotes) |> Some
                         with _ -> None
                     )
 
