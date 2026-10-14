@@ -5,6 +5,7 @@
 - `Solution` drops whitespace and characters that are not safe in a file name from the project name, so `My Project` generates `MyProject.slnx`. A project name with nothing usable left fails the target. Another solution at the repo root whose contents match the generated one is deleted, so rerunning `Solution` migrates an old-named file by itself; commit the rename. A solution with different contents is kept and warned about, as before.
 - Downgrade `fable` tool to 5.0.0 for SAFE-stack projects
   - With `Fable.Remoting.Client`, 5.4.0 sends records the server cannot read and 5.13.0 fails to compile the client. Rerun `Bootstrap` and commit `.config/dotnet-tools.json`.
+- SAFE-stack `Tests` now runs the Fable.Mocha client tests in `tests/Client` alongside the server tests, and a failing client test fails the build. Add `mocha` to the `devDependencies` of your `package.json`.
 
 ## 3.0.0 - 2026-09-25
 - `FSharp.Core` is now declared as a dependency of the packed engine. A consumer whose `Build` group lock already held an older FSharp.Core kept it across `paket install`, and the engine failed to load at startup.
