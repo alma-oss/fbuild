@@ -100,7 +100,7 @@ module Utils =
             | Linux -> "linux-x64"
             | ArmLinux -> "linux-arm64"
             | AlpineLinux -> "linux-musl-x64"
-            | RaspberryPiHassioAddon -> "alpine.3.16-arm64"
+            | RaspberryPiHassioAddon -> "linux-musl-arm64"
             | Custom value -> value
 
         let toRuntimeIdentifier runtimeTarget =
