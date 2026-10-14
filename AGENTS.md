@@ -2,6 +2,10 @@
 
 Guidance for coding agents working in this repository.
 
+## Agent Skills
+
+This repo ships Agent Skill for the `Alma.Build` library. Compatible agents discover it automatically; see `.agents/skills/fbuild/SKILL.md`.
+
 ## Mission
 
 Make minimal, safe changes to the `Alma.Build` engine package while preserving behavior for
