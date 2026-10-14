@@ -5,8 +5,6 @@
 This repository ships one deliverable: `Alma.Build` (`src/Alma.Build/`), the build
 engine library plus the support files that consuming repositories vendor alongside it.
 
-Current engine version: `2.0.0` (`Version` in `src/Alma.Build/Alma.Build.fsproj`).
-
 ## How it works
 
 A consuming repository owns a single build file, `build/Build.fs`, which declares a
@@ -70,7 +68,7 @@ pin and the build project are written by hand.
 group Build
     source https://api.nuget.org/v3/index.json
 
-    nuget Alma.Build 2.0.0
+    nuget Alma.Build <current_version>
 ```
 
 `build/paket.references`:
