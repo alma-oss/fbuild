@@ -1,11 +1,6 @@
-module Fixture.Shared.Tests
+module Fixture.Test.Shared.Tests
 
-open Expecto
-open Fixture.Shared
+open Alma.Testing
+open Fixture.Test
 
-let tests =
-    testList "Shared" [
-        testCase "should retain the message it was given" <| fun _ ->
-            let greeting: Greeting = { Message = "Hello" }
-            Expect.equal greeting.Message "Hello" "Greeting message must be retained"
-    ]
+let tests = testList "Shared" [ Messages.tests ]

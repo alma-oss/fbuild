@@ -4,6 +4,7 @@
         <NoWarn>NU1510</NoWarn>
     </PropertyGroup>
     <ItemGroup>
+        <Compile Include="Messages.fs" />
         <Compile Include="Shared.Tests.fs" />
     </ItemGroup>
     <ItemGroup>

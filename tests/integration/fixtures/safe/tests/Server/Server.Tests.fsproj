@@ -5,6 +5,7 @@
         <NoWarn>NU1510</NoWarn>
     </PropertyGroup>
     <ItemGroup>
+        <Compile Include="Hello.fs" />
         <Compile Include="Server.Tests.fs" />
     </ItemGroup>
     <ItemGroup>

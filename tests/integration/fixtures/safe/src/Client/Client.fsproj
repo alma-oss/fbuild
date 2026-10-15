@@ -8,6 +8,8 @@
         <None Include="vite.config.mts" />
         <None Include="roundtrip.mjs" />
         <Compile Include="RoundTrip.fs" />
+        <Compile Include="Vite.fs" />
+        <Compile Include="View.fs" />
         <Compile Include="App.fs" />
     </ItemGroup>
     <ItemGroup>

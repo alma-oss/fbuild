@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""Moves a shared library's Expecto tests onto Alma.Build 4's layout, so `./build.sh -t Tests` runs
+them under Expecto on .NET and, for the shared ones, under Vitest after Fable compiles them.
+
+Does the mechanical part of docs/migration/library-fable-tests/SKILL.md:
+
+- pins Alma.Build in paket.dependencies and removes Fable.Mocha; before changing anything it lists what it needs
+  from you at once, among it the Alma.Testing line, which it never adds;
+- adds vitest to package.json and node_modules/ and output/ to .gitignore;
+- creates the Library spec with `Spec.library LibraryTests.shared` in build/Build.fs;
+- moves tests/<old>.fsproj to tests/DotNet/DotNet.Tests.fsproj (paths one level deeper, the runner
+  renamed DotNet.Tests.fs and made to run the Shared list too) and every shareable test file to
+  tests/Shared, where it opens Alma.Testing, loses [<Tests>] and is gathered by Shared.Tests.fs;
+- adds a setup-node step after setup-dotnet in each workflow that runs build.sh;
+- adds the Node requirement to the README's Requirements section;
+- runs paket, npm, Bootstrap, Solution, AssemblyInfo and Tests, then checks the result: the generated
+  AssemblyInfo grants, one `register`, no FsCheck in Shared, the baseline, Expecto and Vitest totals, and
+  the `warning FABLE` count.
+
+Everything the commands print goes to migration.log; the script prints only migration-report.md, which
+lists what was done, what is left for you, what the script guessed, and the checks. Both files, and the
+baseline test count a rerun needs, stay out of git through .git/info/exclude.
+
+A file is shared only when it holds a test list, uses nothing .NET-only (FsCheck, reflection, the file
+system, an Expect function Alma.Testing lacks) and opens no file that stays on .NET. Everything else
+stays in tests/DotNet and keeps running there; the report names what to split or rewrite by hand.
+
+Run from the project root of a clean working tree; after a failed run, fix the cause and rerun it
+with `--rerun`. Review with `git diff`; undo with `git checkout -- . && git clean -fd`.
+"""
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+EXPECT_FUNCTIONS = {
+    "equal", "notEqual", "isTrue", "isFalse", "isNull", "isNotNull", "isSome", "wantSome", "isNone",
+    "isOk", "wantOk", "isError", "wantError", "isEmpty", "isNonEmpty", "hasLength", "contains",
+    "containsAll", "exists", "all", "stringContains", "isGreaterThan", "isLessThan", "throws", "throwsC",
+    "isNotNaN", "isNotInfinity", "floatClose", "floatLessThanOrClose", "floatGreaterThanOrClose",
+}
+DOTNET_ONLY = re.compile(
+    r"\b(testProperty\w*|ptestProperty|ftestProperty|testTask|testTheory|testFixture\w*|testParam|"
+    r"FsCheck|Arb\.|Gen\.|Prop\.|System\.IO|System\.Reflection|typeof<|File\.|Directory\.|"
+    r"Environment\.|System\.Random|Random\(|Console\.|System\.Threading|Thread\.|Process\.|Async\.RunSynchronously)"
+)
+ALMA_TESTING_NAMES = {"Expect", "Test", "Tests", "Accuracy", "FocusState"}
+HELPER = "holds no test list"
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+LOG = Path("migration.log")
+REPORT = Path("migration-report.md")
+BASELINE = Path("migration-baseline.txt")
+PREVIOUS = Path("migration-report.previous.md")
+
+
+def move(source, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source.rename(target)
+
+
+def run(command):
+    line = f"$ {' '.join(command)}"
+    print(line, flush=True)
+    with LOG.open("a") as log:
+        log.write(f"\n{line}\n")
+        log.flush()
+        return subprocess.run(command, stdout=log, stderr=subprocess.STDOUT).returncode == 0
+
+
+def log_text(start=0):
+    with LOG.open("rb") as log:
+        log.seek(start)
+        return ANSI.sub("", log.read().decode(errors="replace"))
+
+
+def must(command):
+    if not run(command):
+        tail = "\n".join(log_text().splitlines()[-30:])
+        raise SystemExit(f"\n{tail}\n\nFailed: {' '.join(command)}\nThe full output is in {LOG}. Fix it, then rerun this script with --rerun.")
+
+
+def exclude_artifacts():
+    """Keeps the log, report and baseline out of git without touching the repository's .gitignore."""
+    path = Path(subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], capture_output=True, text=True).stdout.strip())
+    lines = path.read_text().splitlines() if path.exists() else []
+    missing = [str(name) for name in (LOG, REPORT, PREVIOUS, BASELINE) if str(name) not in lines]
+    if missing:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines + missing) + "\n")
+
+
+def require_clean_tree(rerun):
+    """The undo discards every uncommitted change, so a first run starts from a clean tree."""
+    status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+    if status.returncode != 0:
+        raise SystemExit("Run from inside a git repository.")
+    if status.stdout.strip() and not rerun:
+        raise SystemExit("The working tree has uncommitted changes; commit or stash them first. "
+                         "To continue after a failed run of this script, pass --rerun.")
+
+
+def build(target):
+    return ["./build.sh", target] if Path("build.sh").exists() else ["dotnet", "run", "--project", "build/build.fsproj", "--", target]
+
+
+def expecto(project, *arguments):
+    return ANSI.sub("", subprocess.run(["dotnet", "run", "--project", str(project), "--", *arguments],
+                                       capture_output=True, text=True).stdout)
+
+
+def test_count(project):
+    found = re.search(r"EXPECTO! (\d+) tests? run", expecto(project))
+    return int(found.group(1)) if found else None
+
+
+def test_count_of(project, test_list):
+    """Tests Expecto runs under the root list `test_list`."""
+    found = re.search(r"EXPECTO! (\d+) tests? run", expecto(project, "--filter-test-list", test_list))
+    return int(found.group(1)) if found else None
+
+
+def module_name(text):
+    found = re.search(r"(?m)^(?:module|namespace)\s+(?:(?:rec|internal|private|public)\s+)*([\w.]+)", text)
+    return found.group(1) if found else None
+
+
+def classify(files):
+    """Splits test files into those that can move to tests/Shared and those that stay, with a reason each."""
+    texts = {path: path.read_text() for path in files}
+    shared, reasons = set(), {}
+    for path, text in texts.items():
+        code = re.sub(r"//.*", "", text)
+        missing = sorted({name for name in re.findall(r"\bExpect\.(\w+)", code)} - EXPECT_FUNCTIONS)
+        if "[<Tests>]" not in code:
+            reasons[path] = HELPER
+        elif module_name(text) is None:
+            reasons[path] = "declares no top-level module for Shared.Tests.fs to reference; share it by hand"
+        elif DOTNET_ONLY.search(code):
+            reasons[path] = f"uses .NET-only {DOTNET_ONLY.search(code).group(1)}; split its examples into tests/Shared by hand"
+        elif missing:
+            reasons[path] = f"uses Expect.{', Expect.'.join(missing)}, absent from Alma.Testing; rewrite to share it"
+        else:
+            shared.add(path)
+
+    def staying():
+        """Full names of the modules that stay on .NET; short names too for helper modules, which siblings
+        in the same namespace reference unqualified."""
+        for path in files:
+            name = module_name(texts[path])
+            if path not in shared and name:
+                yield name, rf"\b{re.escape(name)}\b" + ("" if "[<Tests>]" in texts[path] else rf"|\b{re.escape(name.split('.')[-1])}\.")
+
+    changed = True
+    while changed:
+        changed = False
+        for path in sorted(shared):
+            needs = [name for name, pattern in staying() if re.search(pattern, texts[path])]
+            if needs:
+                shared.discard(path)
+                reasons[path] = f"uses {needs[0]}, which stays on .NET"
+                changed = True
+    return [path for path in files if path in shared], reasons
+
+
+def deeper(project_text):
+    """Adds a directory level to every relative path in a project file."""
+    return re.sub(r'((?:Include|Project)=")(\.\.[\\/])', r"\1\2\2", project_text)
+
+
+def shared_project(references):
+    items = "\n".join(f'    <ProjectReference Include="{reference}" />' for reference in references)
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+{items}
+  </ItemGroup>
+
+  <ItemGroup>
+__COMPILE__
+  </ItemGroup>
+
+  <Import Project="..\\..\\.paket\\Paket.Restore.targets" />
+</Project>
+"""
+
+
+def restructure(old_project, done, edits, review):
+    tests = old_project.parent
+    text = old_project.read_text()
+    compiled = re.findall(r'<Compile Include="([^"]+)"', text)
+    runner = next((name for name in compiled if (tests / name).exists() and "[<EntryPoint>]" in (tests / name).read_text()), None)
+    if runner is None:
+        raise SystemExit(f"{old_project}: no compiled file holds the [<EntryPoint>]; move the tests by hand.")
+    candidates = [tests / name for name in compiled if name not in ("AssemblyInfo.fs", runner)]
+    shared, reasons = classify(candidates)
+    if not shared:
+        raise SystemExit("No test file can be shared as it is:\n" + "\n".join(f"  - {p}: {r}" for p, r in reasons.items()))
+
+    texts = {path: path.read_text() for path in shared}
+    lists, prefix = [], None
+    for path, source in texts.items():
+        name = module_name(source)
+        lists += [f"{name}.{value}" for value in re.findall(r"\[<Tests>\]\s*\n?\s*let\s+(\w+)", source)]
+        parent = name.rsplit(".", 1)[0] if "." in name else ""
+        prefix = parent if prefix is None else next(
+            (prefix[:i] for i in range(len(prefix), -1, -1) if parent.startswith(prefix[:i]) and (i == len(prefix) or prefix[i] == ".")), "")
+    entry_module = f"{prefix}.Shared.Tests" if prefix else "Shared.Tests"
+
+    outside = [(path, module_name(path.read_text())) for path in candidates]
+    for path, name in [(path, module_name(source)) for path, source in texts.items()] + outside:
+        if name is None:
+            edits.append(f"{path}: no module declaration; test modules belong under <Library.Namespace>.Test")
+        elif not prefix or not name.startswith(f"{prefix}."):
+            edits.append(f"{path}: module {name} is outside the shared test prefix{f' {prefix}' if prefix else ''}; test modules belong under <Library.Namespace>.Test")
+    imported = [name[len(prefix) + 1:] if prefix and name.startswith(f"{prefix}.") and name.split(".")[len(prefix.split("."))] not in ALMA_TESTING_NAMES else name for name in lists]
+
+    references = re.findall(r'<ProjectReference Include="([^"]+)"', deeper(text))
+    dotnet = Path("tests/DotNet")
+    project = deeper(text)
+    project = re.sub(r'(?m)^[ \t]*<Compile Include="AssemblyInfo\.fs"\s*/>\n', "", project)
+    for path in shared:
+        project = re.sub(rf'(?m)^[ \t]*<Compile Include="{re.escape(str(path.relative_to(tests)))}"\s*/>\n', "", project)
+    project = project.replace(f'<Compile Include="{runner}"', '<Compile Include="DotNet.Tests.fs"')
+    project = re.sub(r'(?m)^([ \t]*)(<ProjectReference Include="[^"]+"\s*/>)',
+                     r'\1\2\n\1<ProjectReference Include="../Shared/Shared.Tests.fsproj" />', project, count=1)
+    project = re.sub(r"(?m)^[ \t]*<ItemGroup>\s*</ItemGroup>\n\n?", "", project)
+
+    move(old_project, dotnet / "DotNet.Tests.fsproj")
+    (dotnet / "DotNet.Tests.fsproj").write_text(project)
+    if (tests / "paket.references").exists():
+        move(tests / "paket.references", dotnet / "paket.references")
+    move(tests / runner, dotnet / "DotNet.Tests.fs")
+    program = (dotnet / "DotNet.Tests.fs").read_text()
+    entry_point = re.search(r"(?m)^[ \t]*\[<EntryPoint>\][ \t]*\n", program)
+    if entry_point:
+        shared_list = f"{entry_module}.tests"
+        opened = f"open {prefix}" if prefix else None
+        if opened and re.search(r"(?m)^open Expecto[ \t]*$", program):
+            if not re.search(rf"(?m)^{re.escape(opened)}[ \t]*$", program):
+                program = re.sub(r"(?m)^open Expecto[ \t]*$", f"open Expecto\n{opened}", program, count=1)
+                entry_point = re.search(r"(?m)^[ \t]*\[<EntryPoint>\][ \t]*\n", program)
+            shared_list = f"{entry_module[len(prefix) + 1:]}.tests"
+            review.append(f"tests/DotNet/DotNet.Tests.fs: opened {prefix} and shortened the Shared list to `{shared_list}`")
+        elif prefix:
+            edits.append(f"tests/DotNet/DotNet.Tests.fs: no `open Expecto` to place `{opened}` after; open it and shorten `{entry_module}.tests` by hand")
+        hook = f"[<Tests>]\nlet sharedTests = {shared_list}\n\n"
+        rewritten = program[: entry_point.start()] + hook + program[entry_point.start():]
+    else:
+        rewritten = program
+        edits.append(f"tests/DotNet/DotNet.Tests.fs: mark the Shared list for Expecto's assembly scan ([<Tests>] let sharedTests = {entry_module}.tests)")
+    if module_name(rewritten) is None:
+        added = f"{prefix}.DotNet.Tests" if prefix else "DotNet.Tests"
+        rewritten = f"module {added}\n\n" + rewritten
+        review.append(f"tests/DotNet/DotNet.Tests.fs: the runner had no module declaration; added `module {added}`")
+    (dotnet / "DotNet.Tests.fs").write_text(rewritten)
+    for path in candidates:
+        if path not in shared:
+            move(path, dotnet / path.relative_to(tests))
+
+    target = Path("tests/Shared")
+    for path, source in texts.items():
+        source = re.sub(r"(?m)^([ \t]*)open Expecto[ \t]*$", r"\1open Alma.Testing", source)
+        source = re.sub(r"(?m)^[ \t]*\[<Tests>\][ \t]*\n", "", source)
+        source = re.sub(r"\[<Tests>\][ \t]*", "", source)
+        move(path, target / path.relative_to(tests))
+        (target / path.relative_to(tests)).write_text(source)
+    (target / "Shared.Tests.fs").write_text(
+        f"module {entry_module}\n\nopen Alma.Testing\n" + (f"open {prefix}\n" if prefix else "") + "\nlet tests =\n    testList \"Shared\" [\n"
+        + "".join(f"        {name}\n" for name in imported) + "    ]\n\nregister tests\n")
+    compile_items = "\n".join(f'    <Compile Include="{name}" />' for name in [str(path.relative_to(tests)) for path in shared] + ["Shared.Tests.fs"])
+    (target / "Shared.Tests.fsproj").write_text(shared_project(references).replace("__COMPILE__", compile_items))
+    if re.search(r"(?m)^group Tests\b", Path("paket.dependencies").read_text()):
+        edits.append("tests/Shared/paket.references: not written; paket.dependencies has `group Tests`, so create it with `group Tests` and `Alma.Testing` under it")
+    else:
+        (target / "paket.references").write_text("Alma.Testing\n")
+
+    for leftover in ("bin", "obj"):
+        shutil.rmtree(tests / leftover, ignore_errors=True)
+    (tests / "AssemblyInfo.fs").unlink(missing_ok=True)
+
+    done.append(f"tests/DotNet: {old_project.name} with {len(candidates) - len(shared)} file(s) that stay on .NET, runner {runner} → DotNet.Tests.fs")
+    done.append(f"tests/Shared: {', '.join(path.name for path in shared)}, gathered by Shared.Tests.fs")
+    if prefix:
+        review.append(f"tests/Shared/Shared.Tests.fs: took {prefix} as the shared test prefix, opened it and shortened "
+                      f"{sum(1 for a, b in zip(lists, imported) if a != b)} of {len(lists)} list names; check the prefix and that no short name resolves to another module")
+        review += [f"tests/Shared/Shared.Tests.fs: {a} stays qualified, its first segment clashes with an Alma.Testing name" for a, b in zip(lists, imported) if a == b and a.startswith(f"{prefix}.")]
+    edits += [f"tests/DotNet/{path.name}: {reason}" for path, reason in reasons.items() if reason != HELPER]
+    if references:
+        edits.append(f"tests/Shared/Shared.Tests.fsproj: Fable compiles {', '.join(references)}; drop any it does not need")
+
+
+def alma_testing_ask(arguments):
+    text = Path("paket.dependencies").read_text()
+    if re.search(r"(?m)^\s*nuget Alma\.Testing\b", text):
+        return None
+    main, _, groups = text.partition("\ngroup ")
+    tests_packages = [number for number, line in enumerate(main.splitlines(), 1) if re.match(r"\s*nuget (?:Expecto|YoloDev\.Expecto)\b", line)]
+    if re.search(r"(?m)^group Tests\b", "\ngroup " + groups):
+        where = "to its `group Tests`, and list it under `group Tests` in tests/*/paket.references"
+    elif tests_packages:
+        where = f"after the test packages (the main group's line {tests_packages[-1]}), above any `// [ FAKE GROUP ]` comment"
+    else:
+        where = "to the main group, above any `// [ FAKE GROUP ]` comment"
+    return f"paket.dependencies: add `nuget Alma.Testing {arguments.alma_testing}` {where}"
+
+
+def preflight(arguments):
+    """Everything the script will demand, gathered before it changes anything so the asks arrive at once."""
+    ask = alma_testing_ask(arguments)
+    others = []
+    if shutil.which("npm") is None:
+        others.append("install Node.js and npm; `./build.sh` runs `npm install`")
+    feed = getattr(arguments, "source", None)
+    if feed and not Path(feed).expanduser().is_dir():
+        others.append(f"--source {feed} is not a directory")
+    if any("Fable.Mocha" in path.read_text() for path in Path("tests").rglob("*") if path.is_file() and path.suffix in (".fs", ".references")):
+        others.append("tests/ still uses Fable.Mocha; move those tests to Alma.Testing by hand first")
+    old = sorted(Path("tests").glob("*.fsproj"))
+    if len(old) > 1:
+        others.append(f"several test projects ({', '.join(map(str, old))}); the script handles one")
+    asks = ([ask] if ask else []) + others
+    if asks:
+        listed = "\n".join(f"- {entry}" for entry in asks)
+        raise SystemExit(f"Needs from you before the script can run:\n{listed}\n\nNothing was changed. Do these, then run again with --rerun "
+                         "(the tree is no longer clean once you have edited a file).")
+
+
+def pin_packages(arguments, done, edits):
+    path = Path("paket.dependencies")
+    text = path.read_text()
+    main, _, groups = text.partition("\ngroup ")
+    groups = "\ngroup " + groups if groups else ""
+    original = text
+    main = re.sub(r"(?m)^[ \t]*nuget Fable\.Mocha\b.*\n", "", main)
+    groups = re.sub(r"(?m)^[ \t]*nuget Fable\.Mocha\b.*\n", "", groups)
+    build_group = re.search(r"(?ms)^group Build\b.*?(?=^group |\Z)", groups)
+    if not build_group or not re.search(r"(?m)^[ \t]*nuget Alma\.Build\b", build_group.group(0)):
+        raise SystemExit("paket.dependencies has no `nuget Alma.Build` in `group Build`; move the build onto Alma.Build first (bin/migrate-to-alma-build).")
+    block = re.sub(r"(?m)^([ \t]*)nuget Alma\.Build\b.*$", rf"\1nuget Alma.Build {arguments.alma_build}", build_group.group(0))
+    text = main + groups.replace(build_group.group(0), block)
+    if text != original:
+        path.write_text(text)
+        done.append(f"paket.dependencies: Alma.Build {arguments.alma_build}, Alma.Testing {arguments.alma_testing}, no Fable.Mocha")
+    expecto = re.search(r"(?m)^[ \t]*nuget Expecto[ \t]+(\S.*)$", main)
+    major = re.search(r"\d+", expecto.group(1)) if expecto else None
+    if major and int(major.group(0)) != 11:
+        edits.append(f"paket.dependencies: `nuget Expecto {expecto.group(1).strip()}` is outside Alma.Testing's [11.0.0, 12)")
+
+
+def select_tests(done, edits):
+    path = Path("build/Build.fs")
+    text = path.read_text()
+    line = "Spec.library LibraryTests.shared"
+    if "Spec.library" in text:
+        return
+    if re.search(r"\bLibraryTests\.|^\s*(?:\{.*\bwith\s+)?Tests\s*=", text, re.MULTILINE):
+        edits.append(f"build/Build.fs: already sets the tests; create the Library spec with `{line}` and move them into its argument")
+        return
+    if not re.search(r"\bSpec\.defaultLibrary\b", text):
+        edits.append(f"build/Build.fs: create the Library spec with `{line}`")
+        return
+    path.write_text(re.sub(r"\bSpec\.defaultLibrary\b", line, text))
+    done.append(f"build/Build.fs: {line}")
+    if re.search(r"(?m)^\s*TestsSources\s*=", text):
+        edits.append("build/Build.fs: remove `TestsSources`; the tests are the argument of `Spec.library` now")
+
+
+def add_npm(done):
+    path = Path("package.json")
+    package = json.loads(path.read_text()) if path.exists() else {"private": True, "type": "module"}
+    if package.get("devDependencies", {}).get("vitest"):
+        return
+    package.setdefault("devDependencies", {})["vitest"] = "^3.2.4"
+    path.write_text(json.dumps(package, indent=4) + "\n")
+    ignore = Path(".gitignore")
+    lines = ignore.read_text().splitlines() if ignore.exists() else []
+    missing = [entry for entry in ("node_modules/", "output/") if entry not in lines]
+    if missing:
+        ignore.write_text("\n".join(lines + missing) + "\n")
+    done.append("package.json: vitest; .gitignore: node_modules/, output/")
+
+
+def add_readme_node(done, edits):
+    path = Path("README.md")
+    line = "- [Node.js](https://nodejs.org) with npm (the tests run the Fable compiler and Vitest)"
+    if not path.exists():
+        edits.append(f"README.md: none found; state the Node.js and npm requirement ({line[2:]})")
+        return
+    text = path.read_text()
+    if re.search(r"\bNode(\.js)?\b", text):
+        return
+    section = re.search(r"(?ms)^#{1,6}[ \t]*(?:Development[ \t]+)?Requirements\b.*?(?=^#{1,6}[ \t]|\Z)", text)
+    bullets = list(re.finditer(r"(?m)^[-*][ \t].*$", section.group(0))) if section else []
+    if not bullets:
+        edits.append(f"README.md: no Requirements list to extend; add `{line}`")
+        return
+    at = section.start() + bullets[-1].end()
+    path.write_text(text[:at] + "\n" + line + text[at:])
+    done.append("README.md: Node.js and npm added to the requirements")
+
+
+def add_node_to_ci(setup_node, done, edits):
+    for workflow in sorted(Path(".github/workflows").glob("*.y*ml")):
+        text = workflow.read_text()
+        if "build.sh" not in text or "setup-node" in text:
+            continue
+        lines = text.splitlines()
+        anchor = next((i for i, line in enumerate(lines) if "actions/setup-dotnet" in line), None)
+        start = next((i for i in range(anchor, -1, -1) if re.match(r"\s*-\s", lines[i])), None) if anchor is not None else None
+        if start is None:
+            edits.append(f"{workflow}: add a {setup_node} step (node-version 24) before ./build.sh")
+            continue
+        dash = re.match(r"(\s*)-(\s+)", lines[start])
+        key = " " * (len(dash.group(1)) + 1 + len(dash.group(2)))
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].strip() and len(lines[i]) - len(lines[i].lstrip()) <= len(dash.group(1))), len(lines))
+        while end - 1 > start and not lines[end - 1].strip():
+            end -= 1
+        separator = [""] if end < len(lines) and not lines[end].strip() else []
+        step = [f"{dash.group(1)}-{dash.group(2)}uses: {setup_node}", f"{key}with:", f"{key}  node-version: 24"]
+        workflow.write_text("\n".join(lines[:end] + separator + step + lines[end:]) + "\n")
+        done.append(f"{workflow}: {setup_node} after setup-dotnet")
+
+
+def write_report(done, edits, review, checks):
+    def section(title, entries, empty):
+        return f"## {title}\n\n" + ("\n".join(f"- {entry}" for entry in entries) if entries else empty) + "\n"
+
+    results = None if checks is None else [f"{'ok' if ok else 'FAILED'}: {line}" for ok, line in checks]
+    REPORT.write_text("\n".join([
+        "# Migration report\n",
+        f"This report covers the latest run only; the earlier run's is {PREVIOUS}.\n" if PREVIOUS.exists() else "",
+        section("Done", done, "Nothing to migrate."),
+        section("Left for you", edits, "Nothing left."),
+        section("Guessed by the script, review each", review, "Nothing guessed."),
+        section("Checks", results or [], "Not run yet."),
+    ]))
+    if checks is None:
+        print(f"\nReport so far: {REPORT}")
+
+
+def run_checks(before, output):
+    """The guide's \"Done when\" checks that a command can answer, one line each."""
+    granted = " ".join(path.read_text() for path in Path("src").glob("*/AssemblyInfo.fs"))
+    missing = [name for name in ("Shared.Tests", "DotNet.Tests") if name not in granted]
+    shared_files = [path for path in Path("tests/Shared").rglob("*") if path.is_file() and "obj" not in path.parts and "bin" not in path.parts and "output" not in path.parts]
+    registers = sum(len(re.findall(r"(?m)^register\b", path.read_text())) for path in shared_files if path.suffix == ".fs")
+    fscheck = [str(path) for path in shared_files if "FsCheck" in path.read_text()]
+    after = test_count("tests/DotNet")
+    shared = test_count_of("tests/DotNet", "Shared")
+    vitest = [int(count) for count in re.findall(r"Tests\s+(?:\d+ failed \| )?(?:\d+ skipped \| )?(\d+) passed", output)]
+    warnings = len(re.findall(r"warning FABLE", output))
+    return [
+        (not missing, "src/*/AssemblyInfo.fs grants Shared.Tests and DotNet.Tests" if not missing
+            else f"src/*/AssemblyInfo.fs does not grant {', '.join(missing)}: Alma.Build is too old"),
+        (registers == 1, f"tests/Shared has {registers} `register` line(s), expected 1"),
+        (not fscheck, "tests/Shared references no FsCheck" if not fscheck else f"tests/Shared references FsCheck in {', '.join(fscheck)}"),
+        (before is None or before == after, f"Expecto runs {after} tests" + ("" if before is None else f", the baseline was {before}")),
+        (bool(shared) and shared in vitest,
+         f"Expecto runs {shared} shared tests, Vitest reported {', '.join(map(str, vitest)) or 'no totals'}; one of them must be {shared}"),
+        (warnings == 0, f"{warnings} `warning FABLE` line(s) in the Tests output"),
+    ]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--alma-build", default="~> 4.0", help="Alma.Build constraint (default: ~> 4.0)")
+    parser.add_argument("--alma-testing", default="~> 1.0", help="Alma.Testing constraint (default: ~> 1.0)")
+    parser.add_argument("--setup-node", default="actions/setup-node@v4", help="the action the CI step uses")
+    parser.add_argument("--rerun", action="store_true", help="continue after a failed run, or after adding what the script asked for, on the tree as it is")
+    arguments = parser.parse_args()
+
+    if not Path("build/Build.fs").exists() or not Path("paket.dependencies").exists():
+        raise SystemExit("Run from the project root of an Alma.Build repository.")
+    require_clean_tree(arguments.rerun)
+    preflight(arguments)
+    old = sorted(Path("tests").glob("*.fsproj"))
+
+    before = None
+    exclude_artifacts()
+    if arguments.rerun and REPORT.exists():
+        REPORT.replace(PREVIOUS)
+    elif not arguments.rerun:
+        PREVIOUS.unlink(missing_ok=True)
+    if old:
+        must(["dotnet", "tool", "restore"])
+        must(["dotnet", "paket", "restore"])
+        must(build("AssemblyInfo"))
+        before = test_count(old[0])
+        if before is None:
+            raise SystemExit(f"\n{old[0]} printed no `EXPECTO! <N> tests run` line; fix its test run first, then rerun this script with --rerun.")
+        BASELINE.write_text(f"{before}\n")
+        print(f"{before} tests before the move")
+    elif BASELINE.exists():
+        before = int(BASELINE.read_text())
+
+    done, edits, review = [], [], []
+    pin_packages(arguments, done, edits)
+    add_npm(done)
+    select_tests(done, edits)
+    if old:
+        restructure(old[0], done, edits, review)
+    add_readme_node(done, edits)
+    add_node_to_ci(arguments.setup_node, done, edits)
+    write_report(done, edits, review, None)
+
+    for command in (["dotnet", "tool", "restore"], ["dotnet", "paket", "install"], ["npm", "install"],
+                    build("Bootstrap"), build("Solution"), build("AssemblyInfo")):
+        must(command)
+    granted = " ".join(path.read_text() for path in Path("src").glob("*/AssemblyInfo.fs"))
+    if "Shared.Tests" not in granted:
+        raise SystemExit("\nsrc/*/AssemblyInfo.fs does not grant Shared.Tests internal access: Alma.Build is too old.")
+    start = LOG.stat().st_size
+    must(build("Tests"))
+
+    checks = run_checks(before, log_text(start))
+    write_report(done, edits, review, checks)
+    print("\n" + REPORT.read_text() + f"\nFull output: {LOG}")
+    if not all(ok for ok, _ in checks):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

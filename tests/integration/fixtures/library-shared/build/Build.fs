@@ -7,11 +7,11 @@ let main args =
 
     Targets.init {
         Project = {
-            Name = "test.rootlibrary"
-            Summary = "Library fixture whose project sits in the repository root next to a solution file."
+            Name = "test.library-shared"
+            Summary = "Library fixture with shared tests for integration tests."
             Git = Git.init ()
         }
-        Specs = Spec.defaultLibrary
+        Specs = Spec.library LibraryTests.shared
     }
 
     args |> Args.run

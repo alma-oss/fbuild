@@ -85,6 +85,7 @@ module internal Command =
     type NpmCommand =
         | Install
         | Version
+        | Ls
 
     /// Arguments are supplied separately at the call site.
     type Command =
@@ -129,6 +130,7 @@ module internal Command =
                 match npm with
                 | Install -> [ "install" ]
                 | Version -> [ "--version" ]
+                | Ls -> [ "ls" ]
             | Mirrord -> "mirrord", []
             | Raw cmd -> cmd, []
 
@@ -139,8 +141,6 @@ module internal Command =
         type Transport =
             /// Generic `rtk err <cmd>`: errors/warnings only.
             | Err
-            /// Generic `rtk test <cmd>`: failures only.
-            | Test
             /// Direct spawn — no rtk (long-running, or shell-metachar commands).
             | Raw
 
@@ -148,13 +148,13 @@ module internal Command =
             | Dotnet Build -> Transport.Err, Some (Filter.dotnetBuild (Directory.GetCurrentDirectory ()))
             | Dotnet Publish -> Transport.Raw, Some (Filter.dotnetPublish (Directory.GetCurrentDirectory ()))
             | Dotnet Lint -> Transport.Raw, Some (Filter.fsharplint (Directory.GetCurrentDirectory ()))
-            | Dotnet Tests -> Transport.Test, None
+            | Dotnet Tests -> Transport.Raw, Some Filter.tests
             | Dotnet Pack -> Transport.Err, Some (Filter.dotnetPack (Directory.GetCurrentDirectory ()))
             | Dotnet Restore -> Transport.Err, Some (Filter.dotnetRestore (Directory.GetCurrentDirectory ()))
-            | Dotnet Fable -> Transport.Err, Some Filter.fable
+            | Dotnet Fable -> Transport.Raw, Some Filter.fable
             | Npm Install -> Transport.Err, None
             | Dotnet (Run | WatchRun | FableWatch) -> Transport.Raw, None
-            | Npm Version -> Transport.Raw, None
+            | Npm (Version | Ls) -> Transport.Raw, None
             | Nuget _ -> Transport.Raw, None
             | Mirrord -> Transport.Raw, None
             | Command.Raw _ -> Transport.Raw, None
@@ -163,7 +163,6 @@ module internal Command =
             match transport with
             | Raw -> cmd, args
             | Err -> "rtk", "err" :: cmd :: args
-            | Test -> "rtk", "test" :: cmd :: args
 
     /// Label the parallel runner prefixes a job's output lines with.
     type JobName = JobName of string
@@ -308,17 +307,28 @@ module internal Command =
             result.ExitCode
         | None -> (wrapped command args dir |> Proc.run).ExitCode
 
-    /// Raises on a non-zero exit code.
-    let run (command: Command) (args: string list) (dir: string) =
+    let runOr (command: Command) (args: string list) (dir: string) (fallback: int -> unit) =
         match exitCode command args dir with
         | 0 -> ()
-        | code ->
+        | code -> fallback code
+
+    /// Raises on a non-zero exit code.
+    let run (command: Command) (args: string list) (dir: string) =
+        runOr command args dir (fun code ->
             let cmd, verb = Command.render command
             failwithf "`%s` exited with code %d" (cmd :: verb |> String.concat " ") code
+        )
 
     let runInRoot (command: Command) (args: string list) = run command args "."
 
     // ---- Parallel runner ----
+
+    [<RequireQualifiedAccess>]
+    module JobLine =
+        let private cursorControl = Text.RegularExpressions.Regex @"\x1b\[[0-9;?]*[A-HJKfhlsu]"
+
+        /// Keeps colour codes; cursor codes would move the line over a prefix written before it.
+        let withoutCursorControl (line: string) = cursorControl.Replace (line, "")
 
     module private Parallel =
         let locker = obj ()
@@ -342,7 +352,7 @@ module internal Command =
                     Console.ForegroundColor <- color
                     Console.Write colored
                     Console.ForegroundColor <- currentColor
-                    Console.WriteLine line
+                    Console.WriteLine (JobLine.withoutCursorControl line)
                 )
 
         let onStdout index (JobName name) (line: string) =

@@ -24,8 +24,9 @@ let engineProject = Path.Combine (root, engineProjectPath)
 let fixtures = Path.Combine (root, "tests", "integration", "fixtures")
 
 type Fixture =
-    | Library
-    | LibraryRoot
+    | LibraryDotNet
+    | LibraryShared
+    | LibraryFable
     | Executable
     | Console
     | Safe
@@ -33,8 +34,9 @@ type Fixture =
 [<RequireQualifiedAccess>]
 module Fixture =
     let directory = function
-        | Library -> "library"
-        | LibraryRoot -> "library-root"
+        | LibraryDotNet -> "library-dotnet"
+        | LibraryShared -> "library-shared"
+        | LibraryFable -> "library-fable"
         | Executable -> "executable"
         | Console -> "console"
         | Safe -> "safe"
@@ -47,6 +49,8 @@ let execWith (env: (string * string) list) (workDir: string) (exe: string) (args
     psi.RedirectStandardOutput <- true
     psi.RedirectStandardError <- true
     psi.UseShellExecute <- false
+    // The assertions read the tools' own output, which RTK would compact when the suite itself runs under it.
+    psi.Environment.Remove "RTK_ACTIVE" |> ignore
 
     for name, value in env do
         psi.Environment[name] <- value
@@ -327,6 +331,11 @@ let withFailingEditedFixture fixture (edit: string -> unit) (target: string) (as
         assertFailure code (out + err)
     finally
         cleanup dir
+
+/// Runs a target against a freshly prepared source-engine fixture and hands the run's exit code and
+/// combined output to the assertion callback.
+let withFixtureOutput fixture (target: string) (assertOutput: int -> string -> unit) =
+    withFailingEditedFixture fixture ignore target assertOutput
 
 /// Runs a target against a freshly prepared source-engine fixture and hands its directory to the
 /// assertion callback.

@@ -34,8 +34,8 @@ let modeTests =
             Expect.equal (modeOf (Dotnet Lint)) (Rtk.Transport.Raw, true) "a lint is filtered but spawned directly, not through rtk"
         }
 
-        test "should route through test with no filter when given Dotnet Tests" {
-            Expect.equal (modeOf (Dotnet Tests)) (Rtk.Transport.Test, false) "tests use the failures-only transport and no custom filter"
+        test "should route through raw with a filter when given Dotnet Tests" {
+            Expect.equal (modeOf (Dotnet Tests)) (Rtk.Transport.Raw, true) "a test run is filtered by the engine, which keeps a failure whole"
         }
 
         test "should route through err with a filter when given Dotnet Pack" {
@@ -46,8 +46,8 @@ let modeTests =
             Expect.equal (modeOf (Dotnet Restore)) (Rtk.Transport.Err, true) "a restore is filtered like a build"
         }
 
-        test "should route through err with a filter when given Dotnet Fable" {
-            Expect.equal (modeOf (Dotnet Fable)) (Rtk.Transport.Err, true) "fable is filtered so a clean compile collapses to its tally"
+        test "should route through raw with a filter when given Dotnet Fable" {
+            Expect.equal (modeOf (Dotnet Fable)) (Rtk.Transport.Raw, true) "fable is filtered by the engine, which keeps a failing test's stack whole"
         }
     ]
 
@@ -64,12 +64,6 @@ let wrapTests =
             let result = Rtk.wrap Rtk.Transport.Err "dotnet" [ "build"; "x" ]
 
             Expect.equal result ("rtk", [ "err"; "dotnet"; "build"; "x" ]) "an err transport wraps the command in rtk err"
-        }
-
-        test "should prefix rtk test when the transport is test" {
-            let result = Rtk.wrap Rtk.Transport.Test "dotnet" [ "run" ]
-
-            Expect.equal result ("rtk", [ "test"; "dotnet"; "run" ]) "a test transport wraps the command in rtk test"
         }
     ]
 
@@ -155,4 +149,22 @@ let compactTraceTests =
                 Expect.isFalse (CompactTrace.isCommitHash (System.String ('g', 40))) "a non-hex string is not a SHA"
             }
         ]
+    ]
+
+[<Tests>]
+let jobLineTests =
+    testList "JobLine.withoutCursorControl" [
+        test "should drop cursor movement and visibility codes when Expecto draws its log line" {
+            let line = "\u001b[1000D\u001b[?25h\u001b[37m[18:54:53 \u001b[31mERR\u001b[37m] failed\u001b[0m\u001b[K"
+
+            let result = JobLine.withoutCursorControl line
+
+            Expect.equal result "\u001b[37m[18:54:53 \u001b[31mERR\u001b[37m] failed\u001b[0m" "Only colour codes stay, so the job name before the line stays visible"
+        }
+
+        test "should keep the line when it holds no escape code" {
+            let result = JobLine.withoutCursorControl "tests: ok"
+
+            Expect.equal result "tests: ok" "A plain line is printed as it is"
+        }
     ]

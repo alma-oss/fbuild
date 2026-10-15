@@ -3,6 +3,7 @@ module Alma.Build.Tests.UtilsTests
 open System.Runtime.InteropServices
 open System.Xml.Linq
 open Expecto
+open Fake.IO.Globbing.Operators
 open Alma.Build.Utils
 
 [<Tests>]
@@ -487,7 +488,7 @@ let runtimeConfigurationTests =
         }
 
         test "should expose no runtime configuration when the project spec does not support runtimes" {
-            let result = Spec.defaultLibrary.RuntimeConfiguration
+            let result = (Spec.library LibraryTests.noTests).RuntimeConfiguration
 
             Expect.isNone result "Library should not expose runtime configuration"
         }
@@ -506,3 +507,199 @@ let teeTests =
         }
     ]
 
+
+[<Tests>]
+let testSuitesTests =
+    let withRoot (directories: string list) f =
+        let root = System.IO.Path.Combine (System.IO.Path.GetTempPath (), $"fbuild-library-tests-{System.Guid.NewGuid ():N}")
+        System.IO.Directory.CreateDirectory root |> ignore
+
+        directories
+        |> List.iter (fun segment ->
+            let directory = System.IO.Path.Combine (root, "tests", segment)
+            System.IO.Directory.CreateDirectory directory |> ignore
+            System.IO.File.WriteAllText (System.IO.Path.Combine (directory, $"{segment}.fsproj"), "")
+        )
+
+        try f root
+        finally System.IO.Directory.Delete (root, true)
+
+    let path root segment = System.IO.Path.GetFullPath (System.IO.Path.Combine (root, "tests", segment))
+
+    let fable root segment environment =
+        TestSuite.Fable {
+            Path = path root segment
+            Environment = environment
+            Include = [ $"output/{segment}.Tests.js" ]
+        }
+
+    let projectsOf = function
+        | Library library -> (library :> IProjectSources).Tests |> Seq.map System.IO.Path.GetFileName |> Seq.sort |> List.ofSeq
+        | other -> failtestf "Expected a library, got %s" other.Type
+
+    testList "ProjectSpec.TestSuites" [
+        test "should run no suite when the library has no tests" {
+            let result = (Spec.library LibraryTests.noTests).TestSuites
+
+            Expect.isEmpty result "A library without tests runs nothing"
+        }
+
+        test "should run each test project as a DotNet suite when the library has .NET tests" {
+            withRoot [] (fun root ->
+                let glob = !! (System.IO.Path.Combine (root, "*.fsproj"))
+                System.IO.File.WriteAllText (System.IO.Path.Combine (root, "Library.Tests.fsproj"), "")
+
+                let result = (Spec.library (LibraryTests.DotNet glob)).TestSuites
+
+                Expect.equal
+                    result
+                    [ TestSuite.DotNet (System.IO.Path.Combine (root, "Library.Tests.fsproj")) ]
+                    "A .NET library runs the projects its glob matches and nothing under Fable"
+            )
+        }
+
+        test "should run the DotNet suite and the Shared suite under Vitest in node when the library has shared tests" {
+            withRoot [ "Shared"; "DotNet" ] (fun root ->
+                let result = (Spec.library (LibraryTests.sharedAt root)).TestSuites
+
+                Expect.equal
+                    result
+                    [ TestSuite.DotNet (path root "DotNet"); fable root "Shared" VitestEnvironment.Node ]
+                    "Shared tests run their entry list under Vitest in node, the DotNet project under Expecto"
+            )
+        }
+
+        test "should run only the Fable suite in jsdom when the library has Fable-only tests" {
+            withRoot [ "Fable" ] (fun root ->
+                let result = (Spec.library (LibraryTests.fableAt root)).TestSuites
+
+                Expect.equal result [ fable root "Fable" VitestEnvironment.Jsdom ] "A Fable-only library runs its entry list under Vitest with a DOM"
+            )
+        }
+
+        test "should derive the test projects from each test directory when the library has shared tests" {
+            withRoot [ "Shared"; "DotNet" ] (fun root ->
+                let result = projectsOf (Spec.library (LibraryTests.sharedAt root))
+
+                Expect.equal result [ "DotNet.fsproj"; "Shared.fsproj" ] "Both test directories' projects are built"
+            )
+        }
+
+        test "should derive the test project from tests/Fable when the library has Fable-only tests" {
+            withRoot [ "Fable" ] (fun root ->
+                let result = projectsOf (Spec.library (LibraryTests.fableAt root))
+
+                Expect.equal result [ "Fable.fsproj" ] "The Fable test project is built"
+            )
+        }
+
+        test "should run the server tests and the client tests in jsdom when the spec is a SAFE-stack application" {
+            let specs = Spec.defaultSAFEStackApplication "5.0.3"
+
+            match specs, specs.TestSuites with
+            | SAFEStackApplication safe, [ TestSuite.DotNet server; TestSuite.Fable client ] ->
+                Expect.equal server safe.ServerTestsPath "The server tests run under Expecto"
+                Expect.equal client.Path safe.ClientTestsPath "The client tests run under Vitest"
+                Expect.equal client.Environment VitestEnvironment.Jsdom "Client tests get a DOM"
+                Expect.equal client.Include [ "output/Client.Tests.js" ] "The SAFE template's runner registers every client test"
+            | _, other -> failtestf "Expected a server and a client suite, got %A" other
+        }
+
+        test "should run each test project as a DotNet suite when the spec is an executable or a console application" {
+            [ Spec.defaultExecutable; Spec.defaultConsoleApplication [ Linux ] ]
+            |> List.iter (fun specs ->
+                let projects =
+                    match specs with
+                    | Executable { TestsSources = projects }
+                    | ConsoleApplication { TestsSources = projects } -> projects |> Seq.map TestSuite.DotNet |> List.ofSeq
+                    | other -> failtestf "Unexpected %s" other.Type
+
+                Expect.equal specs.TestSuites projects $"A {specs.Type} runs its test projects and nothing under Fable")
+        }
+    ]
+
+[<Tests>]
+let libraryTestsValidateTests =
+    let withLayout (projects: string list) f =
+        let root = System.IO.Path.Combine (System.IO.Path.GetTempPath (), $"fbuild-library-validate-{System.Guid.NewGuid ():N}")
+        System.IO.Directory.CreateDirectory root |> ignore
+
+        projects
+        |> List.iter (fun directory ->
+            let path = System.IO.Path.Combine (root, "tests", directory)
+            System.IO.Directory.CreateDirectory path |> ignore
+            System.IO.File.WriteAllText (System.IO.Path.Combine (path, $"{directory}.Tests.fsproj"), "")
+        )
+
+        try f root
+        finally System.IO.Directory.Delete (root, true)
+
+    let path root segment = System.IO.Path.GetFullPath (System.IO.Path.Combine (root, "tests", segment))
+
+    testList "LibraryTests.validate" [
+        test "should accept a library without tests" {
+            let result = LibraryTests.validate LibraryTests.noTests
+
+            Expect.equal result (Ok ()) "NoTests never needs a project"
+        }
+
+        test "should return NoTestProjects error when a DotNet glob matches no project" {
+            withLayout [] (fun root ->
+                let tests = LibraryTests.DotNet (!! (System.IO.Path.Combine (root, "tests", "*.fsproj")))
+
+                let result = LibraryTests.validate tests
+
+                match result with
+                | Error (LibraryTestsError.NoTestProjects _) -> ()
+                | other -> failtestf "An empty DotNet glob should be rejected, got %A" other
+            )
+        }
+
+        test "should accept a DotNet glob when it matches a project" {
+            withLayout [ "Library" ] (fun root ->
+                let tests = LibraryTests.DotNet (!! (System.IO.Path.Combine (root, "tests", "*", "*.fsproj")))
+
+                let result = LibraryTests.validate tests
+
+                Expect.equal result (Ok ()) "A glob matching a test project is valid"
+            )
+        }
+
+        test "should return MissingTestProjects error naming each directory without a project when the library has shared tests" {
+            withLayout [ "Shared" ] (fun root ->
+                let result = LibraryTests.validate (LibraryTests.sharedAt root)
+
+                Expect.equal
+                    result
+                    (Error (LibraryTestsError.MissingTestProjects [ path root "DotNet" ]))
+                    "Shared tests need a DotNet project beside the Shared one"
+            )
+        }
+
+        test "should accept shared tests when Shared and DotNet hold a project" {
+            withLayout [ "Shared"; "DotNet" ] (fun root ->
+                let result = LibraryTests.validate (LibraryTests.sharedAt root)
+
+                Expect.equal result (Ok ()) "Shared and DotNet projects are the whole layout"
+            )
+        }
+
+        test "should return MissingTestProjects error when a Fable-only library has no project in tests/Fable" {
+            withLayout [ "DotNet" ] (fun root ->
+                let result = LibraryTests.validate (LibraryTests.fableAt root)
+
+                Expect.equal
+                    result
+                    (Error (LibraryTestsError.MissingTestProjects [ path root "Fable" ]))
+                    "A Fable-only library needs its project in tests/Fable"
+            )
+        }
+
+        test "should accept Fable-only tests when tests/Fable holds a project" {
+            withLayout [ "Fable" ] (fun root ->
+                let result = LibraryTests.validate (LibraryTests.fableAt root)
+
+                Expect.equal result (Ok ()) "tests/Fable is the whole layout"
+            )
+        }
+    ]

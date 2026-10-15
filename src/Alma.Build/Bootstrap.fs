@@ -48,10 +48,8 @@ module Bootstrap =
 
                 IO.File.WriteAllText (path, contents)
 
-    type DeployedFile = {
-        Path: string
-        Contents: ProjectSpec -> DeployedContents option
-    }
+    /// The files a spec deploys, each a path relative to the repository root with its contents.
+    type DeployedFile = ProjectSpec -> (string * DeployedContents) list
 
     [<RequireQualifiedAccess>]
     module internal RuntimeProps =
@@ -67,27 +65,50 @@ module Bootstrap =
         let argument runtimeIdentifier =
             runtimeIdentifier |> RuntimeIdentifier.value |> sprintf "-p:AlmaBuildRuntimeIdentifier=%s"
 
+    [<RequireQualifiedAccess>]
+    module internal VitestConfig =
+        let path (suite: FableTestSuite) =
+            IO.Path.GetRelativePath (IO.Directory.GetCurrentDirectory (), IO.Path.Combine (suite.Path, "vitest.config.mts"))
+            |> String.replace "\\" "/"
+
+        /// The stack filter drops frames in `output/fable_modules`, so a failure points at the test's asserting line.
+        let render (suite: FableTestSuite) =
+            let environment =
+                match suite.Environment with
+                | VitestEnvironment.Node -> "node"
+                | VitestEnvironment.Jsdom -> "jsdom"
+
+            let options =
+                [
+                    sprintf "environment: \"%s\"" environment
+                    suite.Include |> List.map (sprintf "\"%s\"") |> String.concat ", " |> sprintf "include: [%s]"
+                    "onStackTrace: (_error, frame) => !/fable_modules/.test(frame.file)"
+                ]
+
+            [
+                yield "import { defineConfig } from \"vitest/config\";"
+                yield ""
+                yield "export default defineConfig({"
+                yield "    test: {"
+                yield! options |> List.map (sprintf "        %s,")
+                yield "    },"
+                yield "});"
+                yield ""
+            ]
+            |> String.concat "\n"
+
     let internal deployedFiles: DeployedFile list =
         [
-            {
-                Path = ToolsManifest.path
-                Contents =
-                    fun specs ->
-                        specs
-                        |> DotnetTools.tools
-                        |> ToolsManifest.render
-                        |> DeployedContents.Rendered
-                        |> Some
-            }
+            fun specs -> [ ToolsManifest.path, specs |> DotnetTools.tools |> ToolsManifest.render |> DeployedContents.Rendered ]
 
-            {
-                Path = RuntimeProps.path
-                Contents =
-                    fun specs ->
-                        if specs |> RuntimeProps.neededBy
-                        then Some (DeployedContents.Bundled RuntimeProps.resource)
-                        else None
-            }
+            fun specs ->
+                if specs |> RuntimeProps.neededBy
+                then [ RuntimeProps.path, DeployedContents.Bundled RuntimeProps.resource ]
+                else []
+
+            fun specs ->
+                specs.FableTestSuites
+                |> List.map (fun suite -> VitestConfig.path suite, suite |> VitestConfig.render |> DeployedContents.Rendered)
         ]
 
     /// Deploys the support files bundled in the engine assembly, overwriting local copies —
@@ -109,12 +130,10 @@ module Bootstrap =
         )
 
         deployedFiles
-        |> List.iter (fun deployedFile ->
-            match deployedFile.Contents specs with
-            | None -> ()
-            | Some contents ->
-                contents |> DeployedContents.writeTo deployedFile.Path
-                Trace.tracefn " -> %s" deployedFile.Path
+        |> List.collect (fun deployedFile -> deployedFile specs)
+        |> List.iter (fun (path, contents) ->
+            contents |> DeployedContents.writeTo path
+            Trace.tracefn " -> %s" path
         )
 
         if Solution.all () |> List.isEmpty then

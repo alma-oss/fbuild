@@ -2,6 +2,7 @@ module Alma.Build.Tests.Integration.IntegrationTests
 
 open System.IO
 open System.IO.Compression
+open System.Text.RegularExpressions
 open Expecto
 open Utils
 
@@ -22,6 +23,9 @@ let private editedFixtureTest setup edit target label assertArtifacts =
 
 let private failingFixtureTest setup edit target label assertFailure =
     testCase label <| fun () -> withFailingEditedFixture setup edit target assertFailure
+
+let private outputFixtureTest setup target label assertOutput =
+    testCase label <| fun () -> withFixtureOutput setup target assertOutput
 
 let private fileExists (dir: string) (relative: string) = File.Exists (Path.Combine (dir, relative))
 
@@ -54,30 +58,27 @@ let private assertConsoleBuiltForRuntime dir =
 [<Tests>]
 let integrationTests =
     testList "Integration tests" [
-        fixtureTest Library "Release" "should create a NuGet package when a library is released" (fun dir ->
-            Expect.isTrue (anyFile dir "release" "*.nupkg") "Release should move a .nupkg into release/")
-
-        fixtureTest LibraryRoot "Release" "should create a NuGet package when a root library shares its directory with a solution" (fun dir ->
+        fixtureTest LibraryDotNet "Release" "should create a NuGet package when a root library shares its directory with a solution" (fun dir ->
             Expect.isTrue
                 (anyFile dir "release" "*.nupkg")
                 "Release should move a .nupkg into release/ when the project shares the root with a solution file")
 
-        fixtureTest Library "Solution" "should generate a solution listing src and tests when none exists" (fun dir ->
-            let generated = Path.Combine (dir, "test.library.slnx")
+        fixtureTest LibraryShared "Solution" "should generate a solution listing src and tests when none exists" (fun dir ->
+            let generated = Path.Combine (dir, "test.library-shared.slnx")
             Expect.isTrue (File.Exists generated) "Solution should write <Project.Name>.slnx when the repo root carries none"
 
             let content = File.ReadAllText generated
             Expect.stringContains content "src/test.library/test.library.fsproj" "The generated solution should list the library project"
-            Expect.stringContains content "tests/Tests.fsproj" "The generated solution should list the test project"
+            Expect.stringContains content "tests/DotNet/DotNet.Tests.fsproj" "The generated solution should list the test projects"
             Expect.isFalse (content.Contains "build/build.fsproj") "The generated solution should not list the build harness")
 
         editedFixtureTest
-            Library
-            (fun dir -> File.WriteAllText (Path.Combine (dir, "test.library.slnx"), "<Solution></Solution>"))
+            LibraryShared
+            (fun dir -> File.WriteAllText (Path.Combine (dir, "test.library-shared.slnx"), "<Solution></Solution>"))
             "Solution"
             "should overwrite a stale <Project.Name>.slnx with freshly generated content"
             (fun dir ->
-                let content = File.ReadAllText (Path.Combine (dir, "test.library.slnx"))
+                let content = File.ReadAllText (Path.Combine (dir, "test.library-shared.slnx"))
 
                 Expect.stringContains
                     content
@@ -85,8 +86,8 @@ let integrationTests =
                     "Solution rewrites its own file with the current project list rather than leaving a stale one"
                 Expect.isFalse (content = "<Solution></Solution>") "The stale placeholder content is replaced")
 
-        fixtureTest LibraryRoot "Solution" "should leave a differently named checked-in solution alone and still generate its own" (fun dir ->
-            let original = File.ReadAllText (Path.Combine (fixtures, "library-root", "fixture.rootlibrary.slnx"))
+        fixtureTest LibraryDotNet "Solution" "should leave a differently named checked-in solution alone and still generate its own" (fun dir ->
+            let original = File.ReadAllText (Path.Combine (fixtures, "library-dotnet", "fixture.rootlibrary.slnx"))
             let checkedIn = Path.Combine (dir, "fixture.rootlibrary.slnx")
             let generated = Path.Combine (dir, "test.rootlibrary.slnx")
 
@@ -96,8 +97,8 @@ let integrationTests =
                 "Solution only ever writes its own <Project.Name>.slnx, leaving a differently named solution alone"
             Expect.isTrue (File.Exists generated) "Solution still generates <Project.Name>.slnx alongside it")
 
-        fixtureRunTwiceTest Library "Solution" "should regenerate the same content when run a second time" (fun dir ->
-            let generated = Path.Combine (dir, "test.library.slnx")
+        fixtureRunTwiceTest LibraryShared "Solution" "should regenerate the same content when run a second time" (fun dir ->
+            let generated = Path.Combine (dir, "test.library-shared.slnx")
 
             Expect.isTrue (File.Exists generated) "Solution should still have the file it generated on the first run"
             Expect.stringContains
@@ -146,10 +147,67 @@ let integrationTests =
                 (fileExists dir "Directory.Build.props")
                 "Bootstrap should deploy the props that carry the runtime into each project")
 
-        fixtureTest Library "Bootstrap" "should skip the runtime props when a library is bootstrapped" (fun dir ->
+        fixtureTest LibraryDotNet "Bootstrap" "should skip the runtime props when a library is bootstrapped" (fun dir ->
             Expect.isFalse
                 (fileExists dir "Directory.Build.props")
                 "A spec that selects no runtime should not receive the props")
+
+        fixtureTest LibraryDotNet "Bootstrap" "should skip the Vitest config and fable when a library without Fable tests is bootstrapped" (fun dir ->
+            Expect.isEmpty
+                (Directory.GetFiles (dir, "vitest.config.mts", SearchOption.AllDirectories))
+                "A library testing only on .NET has no Vitest suite to configure"
+            Expect.isFalse
+                ((File.ReadAllText (Path.Combine (dir, ".config", "dotnet-tools.json"))).Contains "\"fable\"")
+                "A library testing only on .NET does not need the fable tool")
+
+        fixtureTest LibraryShared "Bootstrap" "should render a node Vitest config into tests/Shared when a library with shared tests is bootstrapped" (fun dir ->
+            Expect.isTrue (fileExists dir "tests/Shared/vitest.config.mts") "Bootstrap should render tests/Shared/vitest.config.mts"
+            Expect.stringContains
+                (File.ReadAllText (Path.Combine (dir, "tests/Shared/vitest.config.mts")))
+                "environment: \"node\","
+                "The Shared suite should run in plain Node"
+            Expect.isFalse (fileExists dir "tests/DotNet/vitest.config.mts") "The DotNet suite has no Vitest config"
+
+            Expect.stringContains
+                (File.ReadAllText (Path.Combine (dir, ".config", "dotnet-tools.json")))
+                "\"fable\""
+                "Shared tests need the fable tool")
+
+        fixtureTest LibraryFable "Bootstrap" "should render a jsdom Vitest config into tests/Fable when a Fable-only library is bootstrapped" (fun dir ->
+            Expect.stringContains
+                (File.ReadAllText (Path.Combine (dir, "tests/Fable/vitest.config.mts")))
+                "environment: \"jsdom\","
+                "A Fable-only suite should run in jsdom"
+            Expect.isFalse (fileExists dir "tests/Shared/vitest.config.mts") "A Fable-only library has no Shared suite"
+
+            Expect.stringContains
+                (File.ReadAllText (Path.Combine (dir, ".config", "dotnet-tools.json")))
+                "\"fable\""
+                "Fable tests need the fable tool")
+
+        outputFixtureTest LibraryShared "Tests" "should run the Shared tests under Vitest and Expecto when a library with shared tests is tested" (fun code output ->
+            Expect.equal code 0 $"Every suite should pass:\n{output}"
+            Expect.stringContains output "output/Shared.Tests.js" "Vitest should run the Shared entry module"
+            Expect.stringContains
+                (Regex.Replace (output, "\u001b\\[[0-9;]*m", ""))
+                "2 tests run"
+                "Expecto should run the gathered Shared test beside the FsCheck property")
+
+        outputFixtureTest LibraryFable "Tests" "should run the Fable-only tests under Vitest in jsdom when a Fable-only library is tested" (fun code output ->
+            Expect.equal code 0 $"The Fable suite should pass:\n{output}"
+            Expect.stringContains output "output/Fable.Tests.js" "Vitest should run the Fable entry module")
+
+        failingFixtureTest
+            LibraryShared
+            (fun dir ->
+                let tests = Path.Combine (dir, "tests", "Shared", "Doubling.fs")
+                File.WriteAllText (tests, (File.ReadAllText tests).Replace ("(double 21) 42", "(double 21) 43")))
+            "Tests"
+            "should fail the build when a library's Shared test fails"
+            (fun code output ->
+                Expect.notEqual code 0 "A failing Shared test should fail the Tests target"
+                Expect.stringContains output "Doubling.fs:9:" "Vitest should point at the asserting F# line"
+                Expect.stringContains output "should double the value when given a number" "Expecto should name the failing test")
 
         fixtureTest Safe "Tests" "should run the client tests when a SAFE application is tested" (fun dir ->
             Expect.isTrue
@@ -159,13 +217,36 @@ let integrationTests =
         failingFixtureTest
             Safe
             (fun dir ->
-                let tests = Path.Combine (dir, "tests", "Client", "Client.Tests.fs")
+                let tests = Path.Combine (dir, "tests", "Client", "Rendering.fs")
                 File.WriteAllText (tests, (File.ReadAllText tests).Replace ("Expect.equal 1 1", "Expect.equal 1 2")))
             "Tests"
             "should fail the build when a SAFE application's client test fails"
             (fun code output ->
                 Expect.notEqual code 0 "A failing client test should fail the Tests target"
-                Expect.stringContains output "Fixture assertion must pass" "The failing client test's message should be reported")
+                Expect.stringContains output "Fixture assertion must pass" "The failing client test's message should be reported"
+                Expect.stringContains output "Rendering.fs:15:" "The failure should point at the asserting F# line")
+
+        failingFixtureTest
+            Safe
+            (fun dir -> File.Delete (Path.Combine (dir, "tests", "Client", "vitest.config.mts")))
+            "Tests"
+            "should fail the build when a SAFE application's Vitest config is missing"
+            (fun code output ->
+                Expect.notEqual code 0 "Tests should not run the client tests without their config"
+                Expect.stringContains output "Run the Bootstrap target first" "The failure should say how to get the config")
+
+        editedFixtureTest
+            Safe
+            (fun dir ->
+                let output = Path.Combine (dir, "tests", "Client", "output")
+                Directory.CreateDirectory output |> ignore
+                File.WriteAllText (Path.Combine (output, "stale.js"), "import \"./removed.js\";"))
+            "Tests"
+            "should clear the client tests' Fable output before compiling when a SAFE application is tested"
+            (fun dir ->
+                Expect.isFalse
+                    (fileExists dir "tests/Client/output/stale.js")
+                    "Tests should delete stale Fable output, which can import modules that no longer exist")
 
         fixtureTest Safe "Bundle" "should publish the server and client when a SAFE application is bundled" (fun dir ->
             Expect.isTrue (anyFile dir "deploy" "*.dll") "Bundle should publish the server into deploy/"
@@ -178,7 +259,7 @@ let integrationTests =
                 execOk (Path.Combine (dir, "src", "Client")) "node" $"roundtrip.mjs {url}"))
 
         testCase "should release a library through the packaged engine" <| fun () ->
-            withPackagedFixture Library "Release" (fun dir ->
+            withPackagedFixture LibraryDotNet "Release" (fun dir ->
                 Expect.isTrue
                     (fileExists dir "build/README.md")
                     "Bootstrap should deploy the bundled files with their directory structure"

@@ -7,8 +7,9 @@
     },
     "devDependencies": {
         "@vitejs/plugin-react": "^4.3.4",
-        "mocha": "^11.1.0",
+        "jsdom": "^30.1.2",
         "vite": "^6.1.0",
+        "vitest": "^3.2.4",
         "xhr2": "^0.2.1"
     }
 }

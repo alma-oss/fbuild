@@ -18,25 +18,24 @@ module DotnetTools =
         }
     ]
 
-    let private safeStackTools = [
-        {
-            Name = "fable"
-            Version = "5.0.0"
-            Commands = [ "fable" ]
-        }
-        {
-            Name = "femto"
-            Version = "0.21.0"
-            Commands = [ "femto" ]
-        }
-    ]
+    let private fable = {
+        Name = "fable"
+        Version = "5.0.0"
+        Commands = [ "fable" ]
+    }
 
-    let tools =
-        function
-        | SAFEStackApplication _ -> commonTools @ safeStackTools
-        | Library _
-        | Executable _
-        | ConsoleApplication _ -> commonTools
+    let private femto = {
+        Name = "femto"
+        Version = "0.21.0"
+        Commands = [ "femto" ]
+    }
+
+    let tools (specs: ProjectSpec) =
+        [
+            yield! commonTools
+            if not specs.FableTestSuites.IsEmpty then yield fable
+            if specs.IsSAFEStack then yield femto
+        ]
 
 [<RequireQualifiedAccess>]
 module ToolsManifest =

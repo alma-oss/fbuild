@@ -1,16 +1,9 @@
-module Fixture.Server.Tests
+module Fixture.Test.Server.Tests
 
 open Expecto
-open Fixture.Shared
 
 [<Tests>]
-let tests =
-    testList "Server" [
-        testCase "should expose the shared greeting when the server builds it" <| fun _ ->
-            let greeting: Greeting = { Message = "Fixture server" }
-            Expect.equal greeting.Message "Fixture server" "Server fixture must use shared data"
-    ]
+let sharedTests = Fixture.Test.Shared.Tests.tests
 
 [<EntryPoint>]
-let main args =
-    runTestsInAssemblyWithCLIArgs [] args
+let main args = Tests.runTestsInAssemblyWithCLIArgs [] args

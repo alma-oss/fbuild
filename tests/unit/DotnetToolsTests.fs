@@ -14,7 +14,7 @@ let toolsTests =
     testList "DotnetTools.tools" [
         test "should require only the tools every target needs when the spec is a library" {
             Expect.equal
-                (names Spec.defaultLibrary)
+                (names (Spec.library LibraryTests.noTests))
                 [ "paket"; "dotnet-fsharplint" ]
                 "A library needs Paket for the restore and fsharplint for Lint"
         }
@@ -22,21 +22,42 @@ let toolsTests =
         test "should require the same tools for an executable as for a library" {
             Expect.equal
                 (names Spec.defaultExecutable)
-                (names Spec.defaultLibrary)
+                (names (Spec.library LibraryTests.noTests))
                 "No executable target shells out to a tool a library does not use"
         }
 
         test "should require the same tools for a console application as for a library" {
             Expect.equal
                 (names (Spec.defaultConsoleApplication [ Linux ]))
-                (names Spec.defaultLibrary)
+                (names (Spec.library LibraryTests.noTests))
                 "No console target shells out to a tool a library does not use"
+        }
+
+        test "should add fable when the library has shared or Fable-only tests" {
+            let root = System.IO.Path.Combine (System.IO.Path.GetTempPath (), $"fbuild-dotnet-tools-{System.Guid.NewGuid ():N}")
+
+            [ "Shared"; "DotNet"; "Fable" ]
+            |> List.iter (fun segment ->
+                let directory = System.IO.Path.Combine (root, "tests", segment)
+                System.IO.Directory.CreateDirectory directory |> ignore
+                System.IO.File.WriteAllText (System.IO.Path.Combine (directory, $"{segment}.fsproj"), "")
+            )
+
+            try
+                [ LibraryTests.sharedAt root; LibraryTests.fableAt root ]
+                |> List.iter (fun tests ->
+                    Expect.equal
+                        (names (Spec.library tests))
+                        (names (Spec.library LibraryTests.noTests) @ [ "fable" ])
+                        "Fable compiles the tests for Vitest; femto stays SAFE-only")
+            finally
+                System.IO.Directory.Delete (root, true)
         }
 
         test "should add the SAFE-stack tools to the common ones when the spec is a SAFE-stack application" {
             Expect.equal
                 (names (Spec.defaultSAFEStackApplication "5.0.3"))
-                (names Spec.defaultLibrary @ [ "fable"; "femto" ])
+                (names (Spec.library LibraryTests.noTests) @ [ "fable"; "femto" ])
                 "A SAFE-stack repository needs fable for the build and femto for the npm side"
         }
     ]

@@ -6,7 +6,7 @@
         <IsPackable>true</IsPackable>
         <AssemblyName>Alma.Build</AssemblyName>
         <PackageId>Alma.Build</PackageId>
-        <Version>3.1.0</Version>
+        <Version>4.0.0-preview.3</Version>
         <Authors>Almacareer</Authors>
         <Description>FAKE + Paket build engine for F# projects.</Description>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>

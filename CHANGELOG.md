@@ -2,6 +2,14 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- [**BC**] A library states its tests when it creates its spec: replace `Spec.defaultLibrary` with `Spec.library LibraryTests.dotNet` (tests in `tests/*.fsproj`), `LibraryTests.noTests`, `LibraryTests.shared` (`tests/Shared` and `tests/DotNet`) or `LibraryTests.fable` (`tests/Fable` alone, for a library that only exists under Fable), and drop `TestsSources`; a custom glob is `Spec.library (LibraryTests.DotNet (<glob>))`.
+- [**BC**] SAFE-stack client tests run under Vitest. Move them from Fable.Mocha to `Alma.Testing` (`bin/migrate-to-alma-testing` in the engine repository), replace `mocha` with `vitest` and `jsdom` in your `devDependencies`, then run `Bootstrap` and commit `tests/Client/vitest.config.mts`.
+- [**BC**] The `InstallClient` target is now `InstallNpm`.
+- [**BC**] Test projects see a project's internal code by their own assembly name, not a fixed `tests`. A test project outside the spec's tests loses that access.
+- A library can test its Fable-compiled code under Vitest, with `tests/Shared` in node or `tests/Fable` in jsdom. See `docs/migration/library-fable-tests/SKILL.md` and `bin/migrate-library-fable-tests` in the engine repository.
+- `WatchTests` and `Tests` work for every project type, and `Tests` runs a project's test suites concurrently.
+- A failing test shows its full output.
+- `bin/migrate-to-alma-build` in the engine repository moves a repository on the hand-copied FAKE build onto `Alma.Build` 4.
 
 ## 3.1.0 - 2026-10-14
 - Fix `RaspberryPiHassioAddon` to use real framework target `linux-musl-arm64`

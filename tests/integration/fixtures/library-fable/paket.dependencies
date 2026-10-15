@@ -1,0 +1,10 @@
+framework: net10.0
+storage: none
+
+source https://api.nuget.org/v3/index.json
+source ~/.nuget/local
+
+nuget FSharp.Core ~> 10.1
+
+nuget Fable.Core ~> 5.0
+nuget Alma.Testing 1.0.0-preview.3
