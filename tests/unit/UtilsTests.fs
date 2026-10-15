@@ -128,50 +128,66 @@ let solutionPartitionSupersededTests =
     ]
 
 [<Tests>]
-let solutionRelativeToTests =
-    testList "Solution.relativeTo" [
+let relativePathTests =
+    testList "RelativePath.create" [
         test "should strip the root and use forward slashes when the path uses backslashes" {
-            let result = Solution.relativeTo "/repo" "/repo\\src\\Foo.fsproj"
+            let result = RelativePath.create "/repo" "/repo\\src\\Foo.fsproj" |> RelativePath.value
 
             Expect.equal result "src/Foo.fsproj" "the Windows separator is normalized regardless of OS"
         }
 
         test "should strip the root and keep forward slashes when the path already uses them" {
-            let result = Solution.relativeTo "/repo" "/repo/src/Foo.fsproj"
+            let result = RelativePath.create "/repo" "/repo/src/Foo.fsproj" |> RelativePath.value
 
             Expect.equal result "src/Foo.fsproj" "an already-forward-slashed path passes through unchanged"
         }
 
         test "should not add a leading slash for a root-level project" {
-            let result = Solution.relativeTo "/repo" "/repo/build.fsproj"
+            let result = RelativePath.create "/repo" "/repo/build.fsproj" |> RelativePath.value
 
             Expect.equal result "build.fsproj" "a root-level project keeps no directory component"
         }
 
         test "should reach back with a parent segment when the path sits outside the root" {
-            let result = Solution.relativeTo "/repo" "/shared/Core.fsproj"
+            let result = RelativePath.create "/repo" "/shared/Core.fsproj" |> RelativePath.value
 
             Expect.equal result "../shared/Core.fsproj" "a project outside the root stays reachable from the solution"
         }
 
         test "should keep the root itself out of the path when the root carries a trailing slash" {
-            let result = Solution.relativeTo "/repo/" "/repo/src/Foo.fsproj"
+            let result = RelativePath.create "/repo/" "/repo/src/Foo.fsproj" |> RelativePath.value
 
             Expect.equal result "src/Foo.fsproj" "a trailing separator on the root adds no empty segment"
         }
     ]
 
+/// A `<Project>` of the generated `<Solution>`, by whether the solution build includes it.
+type private ListedProject =
+    | Built of path: string
+    | Unbuilt of path: string
+
 /// One child of the generated `<Solution>`, in document order.
 type private SolutionEntry =
-    | Folder of name: string * projects: string list
-    | RootProject of path: string
+    | Folder of name: string * projects: ListedProject list
+    | RootProject of ListedProject
 
 [<Tests>]
 let solutionRenderTests =
+    let built path = SolutionProject.Built (RelativePath.create "/repo" ("/repo/" + path))
+    let unbuilt path = SolutionProject.Unbuilt (RelativePath.create "/repo" ("/repo/" + path))
+
     let attribute name (element: XElement) =
         match element.Attribute (XName.Get name) with
         | null -> failtestf "<%s> carries no %s attribute" element.Name.LocalName name
         | attribute -> attribute.Value
+
+    let listedProject (element: XElement) =
+        let path = element |> attribute "Path"
+
+        match element.Elements (XName.Get "Build") |> Seq.map (attribute "Project") |> Seq.toList with
+        | [] -> Built path
+        | [ "false" ] -> Unbuilt path
+        | other -> failtestf "<Project Path=%A> carries unexpected <Build> elements %A" path other
 
     let entriesOf = function
         | None -> failtest "render produced no content"
@@ -182,9 +198,9 @@ let solutionRenderTests =
                 | "Folder" ->
                     Folder (
                         element |> attribute "Name",
-                        element.Elements (XName.Get "Project") |> Seq.map (attribute "Path") |> Seq.toList
+                        element.Elements (XName.Get "Project") |> Seq.map listedProject |> Seq.toList
                     )
-                | "Project" -> RootProject (element |> attribute "Path")
+                | "Project" -> RootProject (element |> listedProject)
                 | other -> failtestf "<%s> is not an element the solution format allows here" other
             )
             |> Seq.toList
@@ -196,72 +212,114 @@ let solutionRenderTests =
             Expect.equal result None "an empty project set renders no file"
         }
 
+        test "should return None when no project is built" {
+            let result = Solution.render [ unbuilt "build/build.fsproj" ]
+
+            Expect.equal result None "a solution of nothing but unbuilt projects is not written"
+        }
+
         test "should group projects under a Folder per top-level directory" {
-            let result = Solution.render [ "src/Alma.Build/Alma.Build.fsproj" ] |> entriesOf
+            let result = Solution.render [ built "src/Alma.Build/Alma.Build.fsproj" ] |> entriesOf
 
             Expect.equal
                 result
-                [ Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ]) ]
+                [ Folder ("/src/", [ Built "src/Alma.Build/Alma.Build.fsproj" ]) ]
                 "a single project is wrapped in its top-level directory's Folder"
         }
 
         test "should sort folders by name and projects within a folder by path" {
             let result =
                 Solution.render [
-                    "tests/unit/unit.fsproj"
-                    "src/Alma.Build/Alma.Build.fsproj"
-                    "tests/integration/integration.fsproj"
+                    built "tests/unit/unit.fsproj"
+                    built "src/Alma.Build/Alma.Build.fsproj"
+                    built "tests/integration/integration.fsproj"
                 ]
                 |> entriesOf
 
             Expect.equal
                 result
                 [
-                    Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ])
-                    Folder ("/tests/", [ "tests/integration/integration.fsproj"; "tests/unit/unit.fsproj" ])
+                    Folder ("/src/", [ Built "src/Alma.Build/Alma.Build.fsproj" ])
+                    Folder ("/tests/", [ Built "tests/integration/integration.fsproj"; Built "tests/unit/unit.fsproj" ])
                 ]
                 "src sorts before tests, and integration sorts before unit within tests"
         }
 
         test "should list a root-level project unwrapped after every folder" {
-            let result = Solution.render [ "build.fsproj"; "src/Alma.Build/Alma.Build.fsproj" ] |> entriesOf
+            let result = Solution.render [ built "build.fsproj"; built "src/Alma.Build/Alma.Build.fsproj" ] |> entriesOf
 
             Expect.equal
                 result
                 [
-                    Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ])
-                    RootProject "build.fsproj"
+                    Folder ("/src/", [ Built "src/Alma.Build/Alma.Build.fsproj" ])
+                    RootProject (Built "build.fsproj")
                 ]
                 "a project with no directory component is unwrapped, after the src Folder"
         }
 
         test "should emit no Folder when every project sits at the root" {
-            let result = Solution.render [ "test.rootlibrary.fsproj"; "build.fsproj" ] |> entriesOf
+            let result = Solution.render [ built "test.rootlibrary.fsproj"; built "build.fsproj" ] |> entriesOf
 
             Expect.equal
                 result
-                [ RootProject "build.fsproj"; RootProject "test.rootlibrary.fsproj" ]
+                [ RootProject (Built "build.fsproj"); RootProject (Built "test.rootlibrary.fsproj") ]
                 "root-level projects are listed on their own, sorted by path"
         }
 
         test "should collapse duplicate paths from overlapping globs" {
             let result =
-                Solution.render [ "src/Alma.Build/Alma.Build.fsproj"; "src/Alma.Build/Alma.Build.fsproj" ]
+                Solution.render [ built "src/Alma.Build/Alma.Build.fsproj"; built "src/Alma.Build/Alma.Build.fsproj" ]
                 |> entriesOf
 
             Expect.equal
                 result
-                [ Folder ("/src/", [ "src/Alma.Build/Alma.Build.fsproj" ]) ]
+                [ Folder ("/src/", [ Built "src/Alma.Build/Alma.Build.fsproj" ]) ]
                 "the duplicate contributes only one Project entry"
         }
 
+        test "should group an unbuilt project by its top-level directory when listed with built ones" {
+            let result =
+                Solution.render [ built "src/Alma.Build/Alma.Build.fsproj"; unbuilt "build/build.fsproj" ] |> entriesOf
+
+            Expect.equal
+                result
+                [
+                    Folder ("/build/", [ Unbuilt "build/build.fsproj" ])
+                    Folder ("/src/", [ Built "src/Alma.Build/Alma.Build.fsproj" ])
+                ]
+                "the unbuilt project gets its own build Folder, sorted among the others"
+        }
+
+        test "should list a project once, built, when it is given as both built and unbuilt" {
+            let result =
+                Solution.render [ unbuilt "build/build.fsproj"; built "build/build.fsproj"; built "src/Alma.Build/Alma.Build.fsproj" ]
+                |> entriesOf
+
+            Expect.equal
+                result
+                [
+                    Folder ("/build/", [ Built "build/build.fsproj" ])
+                    Folder ("/src/", [ Built "src/Alma.Build/Alma.Build.fsproj" ])
+                ]
+                "a project declared as a source stays in the solution build"
+        }
+
         test "should indent by two spaces and end with a newline" {
-            let result = Solution.render [ "build.fsproj"; "src/Alma.Build/Alma.Build.fsproj" ]
+            let result = Solution.render [ built "build.fsproj"; built "src/Alma.Build/Alma.Build.fsproj" ]
 
             Expect.equal
                 result
                 (Some "<Solution>\n  <Folder Name=\"/src/\">\n    <Project Path=\"src/Alma.Build/Alma.Build.fsproj\" />\n  </Folder>\n  <Project Path=\"build.fsproj\" />\n</Solution>\n")
                 "the generated file matches the formatting of a hand-written .slnx"
+        }
+
+        test "should nest Build Project=false under an unbuilt project when rendering" {
+            let result = Solution.render [ built "src/Alma.Build/Alma.Build.fsproj"; unbuilt "build/build.fsproj" ]
+
+            Expect.equal
+                result
+                (Some "<Solution>\n  <Folder Name=\"/build/\">\n    <Project Path=\"build/build.fsproj\">\n      <Build Project=\"false\" />\n    </Project>\n  </Folder>\n  <Folder Name=\"/src/\">\n    <Project Path=\"src/Alma.Build/Alma.Build.fsproj\" />\n  </Folder>\n</Solution>\n")
+                "the slnx exclusion is the format dotnet build honours"
         }
     ]
 
