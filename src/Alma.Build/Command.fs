@@ -289,7 +289,8 @@ module internal Command =
     /// before failing the build, so the process carries no `ensureExitCode`.
     let toJob (name: JobName) (command: Command) (args: string list) (dir: string): ParallelJob = {
         Name = name
-        Process = wrapped command args dir
+        // FAKE's own command echo bypasses the runner's console lock, so the runner prints the start line itself.
+        Process = wrapped command args dir |> CreateProcess.disableTraceCommand
         Output =
             match plan command |> snd with
             | Some filter -> Buffered (report command filter)
