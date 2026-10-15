@@ -69,7 +69,10 @@ let integrationTests =
             let content = File.ReadAllText generated
             Expect.stringContains content "src/test.library/test.library.fsproj" "The generated solution should list the library project"
             Expect.stringContains content "tests/Tests.fsproj" "The generated solution should list the test project"
-            Expect.isFalse (content.Contains "build/build.fsproj") "The generated solution should not list the build harness")
+            Expect.stringContains
+                content
+                "<Project Path=\"build/build.fsproj\">\n      <Build Project=\"false\" />"
+                "The generated solution should list the build harness excluded from the solution build")
 
         editedFixtureTest
             Library

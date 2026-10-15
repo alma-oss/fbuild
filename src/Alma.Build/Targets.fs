@@ -191,7 +191,15 @@ module Targets =
 
         Target.create "Solution" (fun _ ->
             match definition.Project.Name |> SolutionFileName.create with
-            | Ok fileName -> definition.Sources.Build |> Solution.generate (IO.Directory.GetCurrentDirectory ()) fileName
+            | Ok fileName ->
+                let root = IO.Directory.GetCurrentDirectory ()
+                let projects kind = Seq.map (RelativePath.create root >> kind) >> Seq.toList
+
+                [
+                    yield! definition.Sources.Build |> projects SolutionProject.Built
+                    yield! (!! "build/*.fsproj") |> projects SolutionProject.Unbuilt
+                ]
+                |> Solution.generate root fileName
             | Error error -> error |> SolutionFileNameError.format |> failwith
         )
 

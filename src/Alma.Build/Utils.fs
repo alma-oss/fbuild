@@ -201,6 +201,32 @@ module Utils =
 
         let value (SolutionFileName fileName) = fileName
 
+    /// A path relative to a root directory, forward-slashed on every OS.
+    type RelativePath = private RelativePath of string
+
+    [<RequireQualifiedAccess>]
+    module RelativePath =
+        /// `path` relative to `root`, which a path outside it reaches back into with `../`.
+        let create (root: string) (path: string): RelativePath =
+            let forwardSlashed (value: string) = value.Replace('\\', '/')
+
+            IO.Path.GetRelativePath(forwardSlashed root, forwardSlashed path) |> forwardSlashed |> RelativePath
+
+        let value (RelativePath path) = path
+
+    /// A project listed in a generated solution.
+    [<RequireQualifiedAccess>]
+    type SolutionProject =
+        | Built of RelativePath
+        /// Loaded by the IDE, skipped by `dotnet build <solution>`.
+        | Unbuilt of RelativePath
+
+    [<RequireQualifiedAccess>]
+    module SolutionProject =
+        let path = function
+            | SolutionProject.Built path
+            | SolutionProject.Unbuilt path -> path
+
     [<RequireQualifiedAccess>]
     module Solution =
         open System.Xml.Linq
@@ -221,13 +247,6 @@ module Utils =
         /// The solution sitting at the current directory, if any.
         let internal current () = all () |> pick
 
-        /// Forward-slashed and relative to `root`, which a path outside it reaches back into with `../`.
-        let internal relativeTo (root: string) (path: string): string =
-            let forwardSlashed (value: string) = value.Replace('\\', '/')
-
-            IO.Path.GetRelativePath(forwardSlashed root, forwardSlashed path) |> forwardSlashed
-
-        /// `.slnx` contents for the given forward-slashed relative project paths; `None` when there are none.
         let private sameContents (expected: string) (actual: string): bool =
             let normalized (value: string) = value.Replace("\r\n", "\n").TrimEnd ()
 
@@ -239,44 +258,64 @@ module Utils =
 
             superseded |> List.map fst, differing |> List.map fst
 
-        let internal render (projects: seq<string>): string option =
+        /// `.slnx` contents for `projects`; `None` when none of them is built.
+        /// A path given as both built and unbuilt is listed once, built.
+        let internal render (projects: SolutionProject list): string option =
             let topLevelDirectory (path: string) =
                 match path.IndexOf '/' with
                 | -1 -> None
                 | index -> Some (path.Substring(0, index))
 
-            let projectElement path = XElement(XName.Get "Project", XAttribute(XName.Get "Path", path))
+            let pathOf = SolutionProject.path >> RelativePath.value
 
-            let folderElement name paths =
+            let projectElement = function
+                | SolutionProject.Built path ->
+                    XElement(XName.Get "Project", XAttribute(XName.Get "Path", RelativePath.value path))
+                | SolutionProject.Unbuilt path ->
+                    XElement(
+                        XName.Get "Project",
+                        XAttribute(XName.Get "Path", RelativePath.value path),
+                        XElement(XName.Get "Build", XAttribute(XName.Get "Project", "false"))
+                    )
+
+            let folderElement name projects =
                 XElement(
                     XName.Get "Folder",
                     XAttribute(XName.Get "Name", sprintf "/%s/" name),
-                    paths |> List.sort |> List.map projectElement
+                    projects |> List.sortBy pathOf |> List.map projectElement
                 )
 
-            let projects = projects |> Seq.distinct |> Seq.toList
+            let projects =
+                projects
+                |> List.groupBy pathOf
+                |> List.map (snd >> List.minBy (function SolutionProject.Built _ -> 0 | SolutionProject.Unbuilt _ -> 1))
 
             let folders =
                 projects
-                |> List.choose (fun path -> path |> topLevelDirectory |> Option.map (fun directory -> directory, path))
+                |> List.choose (fun project -> project |> pathOf |> topLevelDirectory |> Option.map (fun directory -> directory, project))
                 |> List.groupBy fst
                 |> List.sortBy fst
                 |> List.map (fun (directory, pairs) -> folderElement directory (pairs |> List.map snd))
 
             let rootProjects =
                 projects
-                |> List.filter (topLevelDirectory >> Option.isNone)
-                |> List.sort
+                |> List.filter (pathOf >> topLevelDirectory >> Option.isNone)
+                |> List.sortBy pathOf
                 |> List.map projectElement
 
-            match folders @ rootProjects with
-            | [] -> None
-            | children -> Some (XElement(XName.Get "Solution", children).ToString() + "\n")
+            let isBuilt = function
+                | SolutionProject.Built _ -> true
+                | SolutionProject.Unbuilt _ -> false
+
+            match projects |> List.exists isBuilt with
+            | false -> None
+            | true -> Some (XElement(XName.Get "Solution", folders @ rootProjects).ToString() + "\n")
 
         /// Writes `fileName` at `root` from `projects`, deleting other root solutions with the same contents and warning about the rest.
-        let internal generate (root: string) (fileName: SolutionFileName) (projects: seq<string>): unit =
+        let internal generate (root: string) (fileName: SolutionFileName) (projects: SolutionProject list): unit =
             let path = fileName |> SolutionFileName.value
-            let rendered = projects |> Seq.map (relativeTo root) |> render
+            let relativeTo = RelativePath.create root >> RelativePath.value
+            let rendered = projects |> render
             let others = all () |> List.filter (fun other -> Path.GetFullPath other <> Path.GetFullPath path)
 
             let superseded, differing =
@@ -288,7 +327,7 @@ module Utils =
             superseded
             |> List.iter (fun other ->
                 File.Delete other
-                Trace.tracefn "Deleted %s, superseded by %s" (relativeTo root other) path
+                Trace.tracefn "Deleted %s, superseded by %s" (relativeTo other) path
             )
 
             match differing with
@@ -296,14 +335,14 @@ module Utils =
             | others ->
                 Trace.traceImportantfn
                     "%s already sits at the repo root alongside %s; keep only one committed, since Build fails on more than one solution."
-                    (others |> List.map (relativeTo root) |> String.concat ", ")
+                    (others |> List.map relativeTo |> String.concat ", ")
                     path
 
             match rendered with
             | Some content ->
                 File.WriteAllText(path, content)
                 Trace.tracefn "Wrote %s" path
-            | None -> Trace.tracefn "No projects to render into a solution; nothing written."
+            | None -> Trace.tracefn "No source or test projects to render into a solution; nothing written."
 
     [<RequireQualifiedAccess>]
     module Nuget =

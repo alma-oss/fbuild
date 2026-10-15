@@ -1,4 +1,9 @@
 <Solution>
+  <Folder Name="/build/">
+    <Project Path="build/build.fsproj">
+      <Build Project="false" />
+    </Project>
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Alma.Build/Alma.Build.fsproj" />
   </Folder>
