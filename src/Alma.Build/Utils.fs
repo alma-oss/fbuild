@@ -337,6 +337,136 @@ module Utils =
 
     [<AutoOpen>]
     module ProjectDefinition =
+        [<RequireQualifiedAccess>]
+        type VitestEnvironment =
+            | Node
+            | Jsdom
+
+        [<RequireQualifiedAccess>]
+        type TestSuite =
+            | DotNet of project: string
+            | Fable of FableTestSuite
+
+        and FableTestSuite = {
+            Path: string
+            Environment: VitestEnvironment
+            /// Vitest test files, relative to `Path`: the compiled entry module registering the suite's test list.
+            Include: string list
+        }
+
+        [<RequireQualifiedAccess>]
+        module TestSuite =
+            let fableSuites: TestSuite list -> FableTestSuite list =
+                List.choose (function
+                    | TestSuite.Fable suite -> Some suite
+                    | TestSuite.DotNet _ -> None
+                )
+
+        [<RequireQualifiedAccess>]
+        type LibraryTests =
+            /// A library without tests.
+            | NoTests
+            /// .NET test projects.
+            | DotNet of IGlobbingPattern
+            /// A library used from both .NET and Fable: `tests/Shared` runs on .NET and, compiled by Fable, under Vitest; `tests/DotNet` holds what only runs on .NET.
+            | DotNetAndFable of DotNetAndFableTests
+            /// `tests/Fable` is a Vitest suite for a library that only exists under Fable.
+            | Fable of FableTests
+
+        /// Full paths of the test directories of a library used from both .NET and Fable.
+        and DotNetAndFableTests = {
+            SharedPath: string
+            DotNetPath: string
+        }
+
+        /// Full path of a Fable-only library's test directory.
+        and FableTests = {
+            FablePath: string
+        }
+
+        [<RequireQualifiedAccess>]
+        type internal LibraryTestsError =
+            | NoTestProjects of includes: string list
+            | MissingTestProjects of directories: string list
+
+        [<RequireQualifiedAccess>]
+        module internal LibraryTestsError =
+            let format = function
+                | LibraryTestsError.NoTestProjects includes ->
+                    includes
+                    |> String.concat ", "
+                    |> sprintf "No test project matches %s; point the library's Tests at its test projects, or set LibraryTests.noTests."
+                | LibraryTestsError.MissingTestProjects directories ->
+                    directories
+                    |> String.concat ", "
+                    |> sprintf "No *.fsproj in %s; the library's Tests expect a test project there."
+
+        [<RequireQualifiedAccess>]
+        module LibraryTests =
+            let noTests = LibraryTests.NoTests
+
+            /// `tests/*.fsproj`.
+            let dotNet = LibraryTests.DotNet (!! "tests/*.fsproj")
+
+            let internal dotNetAndFableAt (root: string) =
+                LibraryTests.DotNetAndFable {
+                    SharedPath = Path.getFullName (root </> "tests" </> "Shared")
+                    DotNetPath = Path.getFullName (root </> "tests" </> "DotNet")
+                }
+
+            /// `tests/Shared` and `tests/DotNet`.
+            let dotNetAndFable = dotNetAndFableAt "."
+
+            let internal fableAt (root: string) =
+                LibraryTests.Fable { FablePath = Path.getFullName (root </> "tests" </> "Fable") }
+
+            /// `tests/Fable`.
+            let fable = fableAt "."
+
+            let private missingProjects (directories: string list) =
+                directories
+                |> List.filter (fun path -> !! (path </> "*.fsproj") |> Seq.isEmpty)
+                |> function
+                    | [] -> Ok ()
+                    | missing -> Error (LibraryTestsError.MissingTestProjects missing)
+
+            let internal validate = function
+                | LibraryTests.NoTests -> Ok ()
+                | LibraryTests.DotNet projects when projects |> Seq.isEmpty ->
+                    Error (LibraryTestsError.NoTestProjects (projects.Includes |> List.ofSeq))
+                | LibraryTests.DotNet _ -> Ok ()
+                | LibraryTests.DotNetAndFable tests -> missingProjects [ tests.SharedPath; tests.DotNetPath ]
+                | LibraryTests.Fable tests -> missingProjects [ tests.FablePath ]
+
+            /// Raises on an invalid configuration.
+            let internal valid (tests: LibraryTests) =
+                match validate tests with
+                | Ok () -> tests
+                | Error error -> error |> LibraryTestsError.format |> failwith
+
+            let internal projects = function
+                | LibraryTests.NoTests -> !! "tests/*.fsproj" -- "**/*.fsproj"
+                | LibraryTests.DotNet projects -> projects
+                | LibraryTests.DotNetAndFable tests -> !! (tests.SharedPath </> "*.fsproj") ++ (tests.DotNetPath </> "*.fsproj")
+                | LibraryTests.Fable tests -> !! (tests.FablePath </> "*.fsproj")
+
+            let private fableSuite environment path =
+                TestSuite.Fable {
+                    Path = path
+                    Environment = environment
+                    Include = [ IO.Path.GetFileName (path: string) |> sprintf "output/%s.Tests.js" ]
+                }
+
+            let internal suites = function
+                | LibraryTests.NoTests -> []
+                | LibraryTests.DotNet projects -> projects |> Seq.map TestSuite.DotNet |> List.ofSeq
+                | LibraryTests.DotNetAndFable tests ->
+                    [
+                        TestSuite.DotNet tests.DotNetPath
+                        fableSuite VitestEnvironment.Node tests.SharedPath
+                    ]
+                | LibraryTests.Fable tests -> [ fableSuite VitestEnvironment.Jsdom tests.FablePath ]
+
         type IProjectSources =
             abstract member Sources: IGlobbingPattern
             abstract member Tests: IGlobbingPattern
@@ -408,12 +538,29 @@ module Utils =
                     | Executable _
                     | SAFEStackApplication _ -> None
 
+                member this.TestSuites: TestSuite list =
+                    match this with
+                    | Library spec -> spec.Tests |> LibraryTests.valid |> LibraryTests.suites
+                    | Executable { TestsSources = projects }
+                    | ConsoleApplication { TestsSources = projects } -> projects |> Seq.map TestSuite.DotNet |> List.ofSeq
+                    | SAFEStackApplication spec ->
+                        [
+                            TestSuite.DotNet spec.ServerTestsPath
+                            TestSuite.Fable {
+                                Path = spec.ClientTestsPath
+                                Environment = VitestEnvironment.Jsdom
+                                Include = [ "output/Client.Tests.js" ]
+                            }
+                        ]
+
+                member this.FableTestSuites = this.TestSuites |> TestSuite.fableSuites
+
         and LibrarySpec =
             {
                 Changelog: string
                 ReleaseDir: string
                 LibrarySources: IGlobbingPattern
-                TestsSources: IGlobbingPattern
+                Tests: LibraryTests
                 /// Organization (it is used for a custom github nuget source)
                 Organization: string option
                 /// Configuration for nuget api, to push packages into
@@ -424,7 +571,7 @@ module Utils =
 
             interface IProjectSources with
                 member this.Sources = this.LibrarySources
-                member this.Tests = this.TestsSources
+                member this.Tests = this.Tests |> LibraryTests.valid |> LibraryTests.projects
 
         and [<RequireQualifiedAccess>] NugetApi =
             | NotUsed
@@ -494,7 +641,7 @@ module Utils =
 
         [<RequireQualifiedAccess>]
         module Spec =
-            let defaultLibrary: ProjectSpec =
+            let library (tests: LibraryTests): ProjectSpec =
                 let sources =
                     !! "./*.fsproj"
                     ++ "src/*.fsproj"
@@ -504,7 +651,7 @@ module Utils =
                     Changelog = "CHANGELOG.md"
                     ReleaseDir = "release"
                     LibrarySources = sources
-                    TestsSources = !! "tests/*.fsproj"
+                    Tests = tests
                     Organization = None
                     NugetApi = NugetApi.NotUsed
                     NugetCustomServerRepository = None

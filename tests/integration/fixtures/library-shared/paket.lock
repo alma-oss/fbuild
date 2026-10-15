@@ -1,0 +1,22 @@
+STORAGE: NONE
+RESTRICTION: == net10.0
+NUGET
+  remote: ~/.nuget/local
+    Alma.Testing (1.0.0-preview.4)
+      Expecto (>= 11.0 < 12.0)
+      Fable.Core (>= 5.0 < 6.0)
+      FSharp.Core (>= 10.0.100 < 11.0)
+  remote: https://api.nuget.org/v3/index.json
+    Expecto (11.1.1)
+      FSharp.Core (>= 7.0.200)
+      Mono.Cecil (>= 0.11.6 < 1.0)
+    Expecto.FsCheck (11.1.1)
+      Expecto (>= 11.1.1)
+      FsCheck (>= 3.0)
+      FSharp.Core (>= 7.0.200)
+    Fable.Core (5.4)
+      FSharp.Core (>= 4.7.2)
+    FsCheck (3.4)
+      FSharp.Core (>= 5.0.2)
+    FSharp.Core (10.1.402)
+    Mono.Cecil (0.11.6)

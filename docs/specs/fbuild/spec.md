@@ -47,6 +47,9 @@ Versioned off a single source of truth: `Version` in
   `net10.0` shared framework, so no package reference.
 - **Expecto `~> 10.2`** — both test suites (`tests/unit`, `tests/integration`),
   through Paket's `Tests` group.
+- **`Alma.Testing` previews from `~/.nuget/local`** — the `safe`,
+  `library-shared` and `library-fable` fixtures pin a preview that nuget.org does not carry, so the
+  integration tests need it in that local feed.
 - **`FSharp.Core ~> 10.0`** — main group, and listed in the engine's
   `paket.references` so the packed nuspec declares it as
   `[<locked version>, 11.0.0)`. The locked version is the one the engine assembly
@@ -59,9 +62,13 @@ Versioned off a single source of truth: `Version` in
   packages (§12).
 - **bash** and **git** — required at build time (`build.sh`, and `Git.init`
   shells out to `git rev-parse`).
-- **Node/npm** — required by the SAFE-stack project type, and therefore by the
-  integration tests' `safe` fixture. The consumer's `package.json` has to carry
-  `mocha` as a dev dependency: `Tests` runs the Fable.Mocha client tests under it.
+- **Node/npm** — required by every spec with a Fable test suite (§5.3): the
+  SAFE-stack project type and a `Library` whose tests are `LibraryTests.dotNetAndFable`
+  or `LibraryTests.fable`, and therefore by the integration tests' `safe`,
+  `library-shared` and `library-fable` fixtures. The consumer's `package.json` has to carry
+  `vitest` as a dev dependency, plus `jsdom` when a suite runs in Vitest's jsdom
+  environment, which the SAFE client tests and a `LibraryTests.fable` library use: `Tests` and `WatchTests` check them with
+  `npm ls` up front and fail naming them.
 - **RTK** (optional) — when `RTK_ACTIVE` is set the engine routes commands
   through `rtk` and compacts their output; see §5.5. Absent, output is
   byte-identical to a direct spawn.
@@ -101,8 +108,9 @@ Consumer-repo command surface is one script:
 ### Target graph
 
 Targets are defined in `src/Alma.Build/Targets.fs`. Shared targets: `Info`,
-`Bootstrap`, `Solution`, `Clean`, `AssemblyInfo`, `Build`, `Lint`, `Tests`,
-`Release`, `Publish`, `ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
+`Bootstrap`, `Solution`, `Clean`, `AssemblyInfo`, `InstallNpm`, `Build`, `Lint`,
+`Tests`, `WatchTests`, `Release`, `Publish`, `ZipRelease`, `Run`, `Watch`,
+`RunMirrord`, `WatchMirrord`.
 
 `Bootstrap` sits outside every chain: run explicitly, it extracts the support
 files bundled in the engine assembly into the working directory and writes the
@@ -114,13 +122,30 @@ run (§5.6).
 
 | Spec | Chain |
 | --- | --- |
-| `Library` | `Clean → AssemblyInfo → Build → Lint → Tests → Release → Publish` |
-| `Executable` | `Clean → AssemblyInfo → Build → Lint → Tests → Release ⟺ Watch ⟺ Run …` |
-| `ConsoleApplication` | `Clean → AssemblyInfo → Build → Lint → Tests → Release → ZipRelease` |
-| `SAFEStackApplication` | `SafeClean → AssemblyInfo → InstallClient → Build → Lint → Tests → Bundle`; plus `Run`/`RunMirrord`/`WatchTests` |
+| `Library` | `Clean → AssemblyInfo → InstallNpm → Build → Lint → Tests → Release → Publish` |
+| `Executable` | `Clean → AssemblyInfo → InstallNpm → Build → Lint → Tests → Release ⟺ Watch ⟺ Run …` |
+| `ConsoleApplication` | `Clean → AssemblyInfo → InstallNpm → Build → Lint → Tests → Release → ZipRelease` |
+| `SAFEStackApplication` | `SafeClean → AssemblyInfo → InstallNpm → Build → Lint → Tests → Bundle`; plus `Run`/`RunMirrord` |
+
+Every chain has `Lint → Tests ⟺ WatchTests`.
 
 Build arguments: `no-clean` skips `Clean`; `no-lint` skips `Lint`. Default
 target when none is given is `Build`, for every spec case.
+
+`SafeClean` empties `deploy/`, runs `dotnet fable clean` in `src/Client` (the
+`*.fs.js` files older Fable versions wrote next to the sources), and deletes
+`src/Client/output`: output compiled against other Fable or package versions can
+import modules the current ones lack.
+
+`InstallNpm` runs `npm install` in the repository root when the spec uses npm —
+a `SAFEStackApplication`, or any spec with a Fable test suite — and traces that
+it has nothing to do otherwise.
+
+`AssemblyInfo` writes an `AssemblyInfo.fs` into each project's directory whose
+`InternalsVisibleTo` names every test project's assembly: the literal
+`<AssemblyName>` its project file sets, or else the file's name without its
+extension (`TestAssembly.name`), so tests reach `internal` code whatever their
+project is called.
 
 `AssemblyInfo` and `Build` work from `Sources.Build`, which covers the
 consumer's own projects. It is not a spec field: it always derives from the
@@ -139,12 +164,42 @@ either case (§5.3).
 `Lint` runs one `fsharplint` job per project concurrently and prints each job's
 output as a single block once every job has finished (`GroupedByJob`, §5.5).
 The SAFE targets pair a server job with a client job and run them with live
-interleaved output (`Bundle`, `Run`, `RunMirrord`, `Tests`, `WatchTests`).
-SAFE `Tests` runs the Expecto server tests in `tests/Server` and compiles
-`tests/Client` with Fable into `tests/Client/output`, then runs the top-level
-modules there with `npx mocha`; Fable.Mocha registers its tests with mocha
-outside a browser, so a failing client test fails the target. `WatchTests`
-serves the client tests in the browser through vite instead.
+interleaved output (`Bundle`, `Run`, `RunMirrord`).
+
+`Tests` and `WatchTests` run the spec's test suites (§5.3), one job per suite,
+concurrently with live interleaved output; a failing suite fails the target and
+a spec with no suite traces that there are no tests yet. Neither target looks at
+the spec case — only at its suites:
+
+| Suite | `Tests` | `WatchTests` |
+| --- | --- | --- |
+| `DotNet project` | `dotnet run --no-build --project <project>` | `dotnet watch run` in the project's directory |
+| `Fable suite` | Fable compiles the suite into its `output` without restoring it again (`Build` already did) and runs `env NODE_ENV=test npx vitest run` through `fable --run` | `fable watch` with Vitest's watch mode (`npx vitest`) |
+
+Before any job starts, both targets check every Fable suite and fail up front
+when its `vitest.config.mts` is missing (saying to run `Bootstrap`), when its
+`paket.references` still lists Fable.Mocha (whose browser check makes it render
+its results instead of registering tests in Vitest's jsdom environment, so
+Vitest would report no tests), or when `npm ls` misses `vitest`, or `jsdom`
+for a suite in the jsdom environment. They then delete each Fable suite's
+`output` directory, for the reason `SafeClean` deletes the client's; it does
+not depend on `no-clean`.
+
+A Fable suite has one test file: the compiled entry module its config includes
+(§5.4), which calls `Alma.Testing`'s `register` once on the suite's whole test
+list. Every other test module contributes its tests to that list rather than
+registering its own, so the suite is the one list the entry gathers, as the
+SAFE template's `Client.Tests.fs` already gathers the client and shared tests.
+`register` walks the Expecto-shaped tree into Vitest and does nothing on .NET.
+Vitest transforms the modules through Vite, so `import.meta.env` works, and it
+applies Fable's source maps, so a failure stack points into the `.fs` file
+where the thrown value is a JS `Error`: `Alma.Testing`'s assertions throw one,
+while `failwith` throws Fable's `Exception`, which is not an `Error` and has no
+stack. `fable --run` forces `NODE_ENV=production` on the command it runs; `env`
+resets it, since under `production` Vite reports `import.meta.env.PROD`. `env`
+makes the targets depend on a POSIX shell environment, as `build.sh` already
+does.
+
 Every other target is serial.
 
 ## 4. Project structure
@@ -160,6 +215,17 @@ paket.lock              # authoritative version pin
 build.sh                # symlink to bootstrap/build.sh — also this repo's entry point
 fsharplint.json         # symlink to bootstrap/fsharplint.json
 .editorconfig           # symlink to bootstrap/.editorconfig
+
+bin/                    # consumer migration scripts, run in the consuming repo
+  migrate-to-alma-build #   hand-copied FAKE build -> Alma.Build 4
+  migrate-safe-stack-tests #  SAFE-stack Fable.Mocha tests -> Alma.Testing, a find-and-replace;
+                        #   reports what is left as path:line
+  migrate-library-fable-tests # library tests -> tests/Shared + tests/DotNet (Alma.Build 4);
+                        #   shares whole files only, reports the rest
+  upgrade-vite          # Vitest 5, and a SAFE-stack client's Vite 8 + plugin-react 6 with its config renames;
+                        #   compares the bundle sizes before and after
+  migration.py          #   plumbing the scripts import: log, report, baseline, preflight, README and CI
+                        #   edits, the Vite upgrade
 
 bootstrap/              # BOOTSTRAP ASSETS — embedded into the engine assembly,
                         # symlinked into the repo because it is its own first consumer
@@ -198,6 +264,7 @@ tests/
 .github/workflows/      # pr-check, tests, publish
 release/                # packed artifacts (git-ignored)
 docs/                   # this document and design notes
+  migration/            #   consumer migration guides (fable-tests/, one skill for both scripts)
 ```
 
 Git-ignored: `bin/`, `obj/`, `release/`, `.paket/`, `packages/`, `paket-files/`,
@@ -219,7 +286,25 @@ build/
   Build.fs             # author-owned
   README.md            # deployed by Bootstrap
 src/ …                 # application code
+tests/ …               # see below
 ```
+
+A `Library` whose tests are `LibraryTests.dotNetAndFable` lays its tests out as:
+
+```
+package.json           # vitest as a dev dependency
+tests/
+  Shared/              # tests of code that runs on both sides, written with Alma.Testing
+    <Area>.fs          #   one file per area, `<Area>.fs` never `<Area>.Tests.fs`, exposing `tests`
+    Shared.Tests.fs    #   entry: `register`s the Shared list, so Vitest runs it; a no-op on .NET
+    vitest.config.mts  #   rendered by Bootstrap
+  DotNet/              # Expecto executable: gathers the Shared lists and adds .NET-only
+                       #   tests (FsCheck properties, reflection, file system)
+```
+
+A `Library` whose tests are `LibraryTests.fable`, one that only exists under
+Fable, has `tests/Fable` alone: `<Area>.fs` files, the entry `Fable.Tests.fs` that
+`register`s the list, and a `vitest.config.mts` rendered by Bootstrap.
 
 Adoption steps are in `README.md`.
 
@@ -268,13 +353,88 @@ is mandatory across all build projects — there is no Paket-free variant.
 
 | Case | Default constructor | Key fields |
 | --- | --- | --- |
-| `Library` | `Spec.defaultLibrary` | `ReleaseDir`, `NugetApi`, `Organization`, `NugetCustomServerRepository` |
+| `Library` | `Spec.library tests` | `Tests`, `ReleaseDir`, `NugetApi`, `Organization`, `NugetCustomServerRepository` |
 | `Executable` | `Spec.defaultExecutable` | `ReleaseDir = ./app` |
 | `ConsoleApplication` | `Spec.defaultConsoleApplication runtimeTargets` | `RuntimeTargets`, `RuntimeMode = Portable`, `PublishSingleFile = true`, `ReleaseSource`, `ReleaseDir = ./dist` |
 | `SAFEStackApplication` | `Spec.defaultSAFEStackApplication templateVersion` | Shared/Server/Client + test paths, `DeployPath` |
 
 Every case implements `IProjectSources` (`Sources` / `Tests` / `Build` globs) and
 each has a `Spec.map*` function for overriding fields from `Build.fs`.
+
+**Library tests.** `LibrarySpec.Tests` is a `LibraryTests`, the one field a
+library's test projects and test suites both derive from, so they cannot
+disagree. `Spec.library` takes it as its only argument, so every library states
+its tests:
+
+```fsharp
+[<RequireQualifiedAccess>]
+type LibraryTests =
+    | NoTests
+    | DotNet of IGlobbingPattern
+    | DotNetAndFable of DotNetAndFableTests
+    | Fable of FableTests
+
+and DotNetAndFableTests = { SharedPath: string; DotNetPath: string }
+
+and FableTests = { FablePath: string }
+```
+
+| Value | Test projects (`IProjectSources.Tests`) | Test suites |
+| --- | --- | --- |
+| `LibraryTests.noTests` | none | none |
+| `LibraryTests.dotNet` = `DotNet (!! "tests/*.fsproj")` | the glob | one `DotNet` suite per project |
+| `LibraryTests.dotNetAndFable` = `tests/Shared`, `tests/DotNet` | `*.fsproj` in each path | `DotNet` over `DotNetPath`; `Fable` over `SharedPath` in the `Node` environment |
+| `LibraryTests.fable` = `tests/Fable` | `*.fsproj` in the path | `Fable` over `FablePath` in the `Jsdom` environment |
+
+The paths are full paths, as the SAFE paths are. A consumer passes a custom glob
+with `LibraryTests.DotNet (!! "tests/*/*.fsproj")`, and overrides other fields
+with `Spec.mapLibrary`:
+
+```fsharp
+Spec.library LibraryTests.dotNetAndFable
+|> Spec.mapLibrary (fun library -> { library with NugetApi = NugetApi.KeyInEnvironment "NUGET_API_KEY" })
+```
+
+`SharedPath` holds the tests of code that runs on both sides. Under Fable they
+run through its own Vitest suite; on .NET the `DotNetPath` project references
+the Shared project and marks its list with `[<Tests>]`, since Expecto only discovers
+it in the entry assembly. `DotNetPath` also holds what only runs on .NET.
+`FablePath` holds the tests of a library whose code exists only under Fable;
+a library that compiles to both sides has none.
+
+**Library test validation.** Deriving a library's test projects or suites
+checks them first and raises naming what is wrong, so `Targets.init` fails
+the build before it creates any target:
+
+| `Tests` | Fails when |
+| --- | --- |
+| `NoTests` | never |
+| `DotNet glob` | the glob matches no project |
+| `DotNetAndFable` | `SharedPath` or `DotNetPath` holds no `*.fsproj` |
+| `Fable` | `FablePath` holds no `*.fsproj` |
+
+**Test suites.** `ProjectSpec.TestSuites: TestSuite list` is what `Tests`,
+`WatchTests`, `InstallNpm`, `Bootstrap` and the tools manifest read;
+none of them matches on the spec case to find tests.
+
+```fsharp
+[<RequireQualifiedAccess>]
+type TestSuite =
+    | DotNet of project: string
+    | Fable of FableTestSuite
+
+and FableTestSuite = {
+    Path: string
+    Environment: VitestEnvironment     // Node | Jsdom
+    Include: string list               // the compiled entry module, relative to Path
+}
+```
+
+| Spec | Suites |
+| --- | --- |
+| `Library` | from `Tests`, above; a Fable suite includes `output/<directory>.Tests.js` (`Shared.Tests.js`, `Fable.Tests.js`) and runs in `Node` for `DotNetAndFable`, `Jsdom` for `Fable`; a library has no way to choose the environment |
+| `Executable`, `ConsoleApplication` | one `DotNet` suite per `TestsSources` project |
+| `SAFEStackApplication` | `DotNet ServerTestsPath`; `Fable ClientTestsPath` in `Jsdom`, including `output/Client.Tests.js` (the SAFE template's runner, which gathers the test lists) |
 
 `NugetApi = NotUsed | AskForKey | Organization of name | KeyInEnvironment of
 envVarName` drives the `Publish` target. The consumer-facing `RuntimeTarget` is
@@ -328,23 +488,31 @@ its own first consumer, so the checkout and the bundled payload cannot drift.
 
 `Bootstrap` then walks `deployedFiles`, the files whose presence or contents
 follow from the project spec rather than from the `bootstrap/` glob. Each entry
-is a `DeployedFile` — a path plus a `ProjectSpec -> DeployedContents option`,
-where `None` keeps the file out of a repo that has no use for it and
-`DeployedContents` says whether the bytes are `Bundled` (streamed from a
-resource) or `Rendered` (text computed from the spec).
+maps a `ProjectSpec` to the files it deploys — each a path relative to the repo
+root plus its `DeployedContents` — where an empty list keeps the file out of a
+repo that has no use for it and `DeployedContents` says whether the bytes are
+`Bundled` (streamed from a resource) or `Rendered` (text computed from the
+spec).
 
-Two files are deployed this way. `.config/dotnet-tools.json` is `Rendered` from
+Three kinds of file are deployed this way. `.config/dotnet-tools.json` is `Rendered` from
 `DotnetTools.tools` for every spec: all of them get `paket`, which `build.sh`
 restores before any target runs, and `dotnet-fsharplint`, which backs `Lint`;
-`SAFEStackApplication` also gets `fable`, which `SafeClean`, `Bundle`, `Run`,
-`Tests` and `WatchTests` invoke, and `femto`, which syncs the npm side of the SAFE template.
+a spec with a Fable test suite, and every `SAFEStackApplication`, also gets
+`fable`, which `SafeClean`, `Bundle`, `Run`, `Tests` and `WatchTests` invoke;
+`SAFEStackApplication` also gets `femto`, which syncs the npm side of the SAFE template.
 `fable` stays at 5.0.0: 5.4.0 compiles a `Fable.Remoting.Client` proxy that
 encodes options as unions the server cannot decode, and 5.13.0 fails to compile
 `Fable.Remoting.MsgPack`. The `safe` fixture's round-trip case guards a bump.
 `Directory.Build.props` is `Bundled`, and only for a spec whose `RuntimeMode`
-resolves to a runtime at all — every mode but `Portable` (§5.3). Like the
-bundled files both are overwritten, so a tool or a property added by hand is
-lost on the next run.
+resolves to a runtime at all — every mode but `Portable` (§5.3).
+A `vitest.config.mts` is `Rendered` into the `Path` of every Fable test suite
+(`VitestConfig.render`) — Vitest runs in that directory, so it finds the config
+there with no flag: the suite's `environment` and `include` (§5.3; Fable
+compiles `Client.Tests.fs` to `output/Client.Tests.js`), and an `onStackTrace`
+filter dropping frames under `fable_modules`, so a failure reports the test's
+own line rather than a frame inside `Alma.Testing`, which Fable compiles into
+`output/fable_modules`. Like the bundled files all of them are overwritten, so
+a tool, a property or a config option added by hand is lost on the next run.
 
 `DotnetTools` and `ToolsManifest` live in `src/Alma.Build/DotnetTools.fs`, which
 holds the version pins. The manifest is serialised from a DTO by
@@ -368,7 +536,7 @@ type Command =
     | Dotnet of DotnetCommand   // Build Restore Lint Tests Pack Publish
                                 // Fable FableWatch Run WatchRun
     | Nuget of NugetCommand     // Push AddSource
-    | Npm of NpmCommand         // Install Version
+    | Npm of NpmCommand         // Install Version Ls
     | Mirrord
     | Raw of cmd: string
 ```
@@ -381,11 +549,16 @@ executes several concurrently. A parallel run sequences output either `Live`
 job must terminate).
 
 **RTK integration.** `RTK_ACTIVE` in the environment switches the whole layer
-on. Each command then picks a transport (`rtk err`, `rtk test`, or a direct
-spawn) and, where one exists, a `RtkFilter.Filter` that reduces the captured
-output: MSBuild diagnostics deduped and made repo-relative for
+on. Each command then picks a transport (`rtk err` or a direct spawn) and,
+where one exists, a `RtkFilter.Filter` that reduces the captured output:
+MSBuild diagnostics deduped and made repo-relative for
 `build`/`restore`/`pack`/`publish`, one compact `file:line:col FLxxxx message`
-per warning for `fsharplint`, a `compiled N/M in Xms` tally for Fable. A filter
+per warning for `fsharplint`, a `compiled N/M in Xms` tally for Fable followed
+by Vitest's `Test Files`/`Tests` summary when `--run` ran tests, and Expecto's
+`EXPECTO! … tests run` summary for a .NET test run. Fable and test runs are
+spawned directly rather than through `rtk err`, whose errors-only reduction
+would drop a failing test's name and its `.fs` stack line; their filters strip
+ANSI colour codes, which both Fable and Expecto write to a pipe. A filter
 that keeps nothing on a clean exit collapses to a single `<command>: ok` line;
 a *failing* run whose error the filter's whitelist did not match falls back to
 the raw output, so nothing is ever summarised away when it matters. Where a
@@ -438,8 +611,7 @@ hand-authoring it.
 - Every other `.slnx`/`.sln` already at the repo root (`Solution.all`, §3) is
   compared with the rendered content by the internal `Solution.partitionSuperseded`,
   which ignores line endings and trailing whitespace. A match is a stale copy
-  under an earlier name — for instance from before `SolutionFileName.create`
-  normalization — and is deleted before the new file is written; deleting
+  under another name and is deleted before the new file is written; deleting
   first keeps a case-insensitive filesystem, where a name differing only in
   case is the target file itself, from losing the fresh write. Any other file
   is left in place and the target warns: `Build` fails on more than one
@@ -482,7 +654,7 @@ Representative engine style — records + globbing patterns, pipeline-first,
 pattern matching on the spec case:
 
 ```fsharp
-let defaultLibrary: ProjectSpec =
+let library (tests: LibraryTests): ProjectSpec =
     let sources =
         !! "./*.fsproj"
         ++ "src/*.fsproj"
@@ -492,7 +664,7 @@ let defaultLibrary: ProjectSpec =
         Changelog = "CHANGELOG.md"
         ReleaseDir = "release"
         LibrarySources = sources
-        TestsSources = !! "tests/*.fsproj"
+        Tests = tests
         Organization = None
         NugetApi = NugetApi.NotUsed
         NugetCustomServerRepository = None
@@ -504,7 +676,9 @@ Conventions in force:
 - `[<RequireQualifiedAccess>]` on helper modules (`Args`, `Option`, `Solution`,
   `Nuget`, `Spec`, `Git`, `RuntimeTarget`, `NugetApi`, `Http`, `Github`,
   `Command`, `Rtk`, `CompactTrace`, `Filter`, `JobName`, `ExitCode`,
-  `CapturedOutput`).
+  `CapturedOutput`, `LibraryTests`, `FableSuites`, `DotNetSuite`), and on the
+  `TestSuite`, `VitestEnvironment` and `LibraryTests` unions, whose `Fable` and
+  `DotNet` cases would otherwise shadow the `Command` cases of the same name.
 - Companion `default*` / `map*` pairs per spec case; adding a case means adding
   both.
 - Single-case wrappers (`JobName`, `ExitCode`, `CapturedOutput`, `OutputLine`)
@@ -522,17 +696,18 @@ Conventions in force:
 
 ## 8. Testing strategy
 
-Two Expecto suites, both run by the `Tests` target (this repo's `TestsSources`
-is `tests/*/*.fsproj` — one level only, so integration fixture projects are
-not mistaken for tests).
+Two Expecto suites, both run by the `Tests` target (this repo's `Tests` is
+`LibraryTests.DotNet (!! "tests/*/*.fsproj")` — one level only, so integration
+fixture projects are not mistaken for tests).
 
 **Unit — `tests/unit/`.** Covers the pure parts the rest of the engine is built
 on: the output filters (`RtkFilterTests`), the command vocabulary, transport
-selection, tee decision and trace compaction (`CommandTests`), runtime resolution
-and solution rendering (`UtilsTests`), the tool pins and manifest rendering
+selection, tee decision and trace compaction (`CommandTests`), runtime resolution,
+solution rendering, the test projects and suites each spec derives and the
+library test validation (`UtilsTests`), the tool pins and manifest rendering
 (`DotnetToolsTests`), the
 deployed-file table (`BootstrapTests`), and runtime command construction
-(`TargetsTests`). Fast, spawns no processes.
+with the Fable suites' npm prerequisites and arguments (`TargetsTests`). Fast, spawns no processes.
 
 **Integration — `tests/integration/`.** One or more independent cases exercise each
 `ProjectSpec` shape. Each case copies its checked-in fixture repo out of
@@ -551,25 +726,36 @@ give every fixture copy isolated engine `bin`/`obj` paths, so cases can run conc
 
 | Fixture | Target | Asserted |
 | --- | --- | --- |
-| `library` | `Release` | a `.nupkg` in `release/` |
-| `library-root` | `Release` | a `.nupkg` in `release/` when the project shares the root with a solution |
+| `library-dotnet` | `Release` | a `.nupkg` in `release/` when the project shares the root with a solution |
 | `executable` | `Release` | `app/test.executable.dll` |
 | `console` | `Release` | Linux x64 and macOS x64/arm64 archives, each holding the single-file executable |
 | `console` | `Build` | every project of the solution built under its runtime, nothing in the runtime-agnostic output |
 | `console`, solution deleted | `Build` | the same, with `Build` fanning out per project directory |
 | `console` | `Bootstrap` | `Directory.Build.props` deployed |
-| `library` | `Bootstrap` | no `Directory.Build.props` deployed |
-| `library` | `Solution` | generated `.slnx` lists `src/` and `tests/`, not `build/` |
-| `library`, stale `.slnx` | `Solution` | stale `<Project.Name>.slnx` overwritten with fresh content |
-| `library-root` | `Solution` | differently named checked-in solution left alone; own `.slnx` generated alongside it |
-| `library` | `Solution` run twice | second run regenerates identical content, no second file |
+| `library-dotnet` | `Bootstrap` | no `Directory.Build.props` deployed |
+| `library-shared` | `Solution` | generated `.slnx` lists `src/` and `tests/`, not `build/` |
+| `library-shared`, stale `.slnx` | `Solution` | stale `<Project.Name>.slnx` overwritten with fresh content |
+| `library-dotnet` | `Solution` | differently named checked-in solution left alone; own `.slnx` generated alongside it |
+| `library-shared` | `Solution` run twice | second run regenerates identical content, no second file |
+| `library-shared` | `Tests` | the Shared `Alma.Testing` tests pass under Vitest (node) and, gathered by `tests/DotNet`, under Expecto beside an FsCheck property |
+| `library-shared`, failing Shared test | `Tests` | the target fails, reporting the test's `.fs` line from Vitest and its name from Expecto |
+| `library-shared` | `Bootstrap` | `vitest.config.mts` in `tests/Shared` (node environment); `fable` in the tools manifest |
+| `library-fable` | `Tests` | the `tests/Fable` suite passes under Vitest in jsdom, reading and writing `document.title` through a Fable-only function |
+| `library-fable` | `Bootstrap` | `vitest.config.mts` in `tests/Fable` (jsdom environment) and none in `tests/Shared`; `fable` in the tools manifest |
+| `library-dotnet` | `Bootstrap` | no `vitest.config.mts`, no `fable` in the tools manifest |
+| `safe` | `Tests` | under the rendered config, the one list `Client.Tests.fs` registers: a test reading `import.meta.env.BASE_URL` through Vite, a test rendering a client view into a jsdom element, and the shared `Alma.Testing` tests; the server's Expecto entry runs the same shared tests |
+| `safe`, Vitest config deleted | `Tests` | the target fails and says to run `Bootstrap` |
+| `safe`, failing `Alma.Testing` client test | `Tests` | the target fails, reporting the test's message and its `.fs` line |
+| `safe`, stale `tests/Client/output/stale.js` | `Tests` | `Tests` deletes it |
 | `safe` | `Bundle` | a server `.dll` in `deploy/`, an `.html` in `deploy/public/` |
 | `safe` | `Bundle` | the published server, started on a free port, echoes a record of a single-case DU, a union with fields, options, `int64`, `decimal`, list, `Map`, tuple and `Result` back to the Fable-compiled `Fable.Remoting.Client` proxy run under Node; the server and the client each compare it to the shared sample |
 
 Landing on the terminal target pulls the whole chain (`AssemblyInfo`, `Build`,
 `Lint`, `Tests`) with it. Fixtures reference the engine **from source**, so the
 integration tests exercise whatever is checked out with no repack step in between. Set
-`FBUILD_KEEP_TEMP` to keep a scenario's directory for inspection.
+`FBUILD_KEEP_TEMP` to keep a scenario's directory for inspection. Fixture processes run
+with `RTK_ACTIVE` removed from their environment, since the cases assert the
+tools' own output, which RTK would compact (§5.5).
 
 **The packaging gate:** the `should release a library through the packaged engine` case. It packs the
 engine under a version nuget.org does not carry, installs it into a throwaway
@@ -638,6 +824,13 @@ cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 - [x] Consuming repos can resolve `Alma.Build` — it is published to nuget.org,
       reachable from CI and dev machines alike.
 - [x] `Publish` has been exercised against that feed.
+- [x] A library that sets `Spec.library LibraryTests.dotNetAndFable` in `Build.fs` and
+      runs `Bootstrap` gets its Shared tests run under Vitest and Expecto, and its
+      DotNet tests under Expecto, by `./build.sh -t Tests`.
+- [x] A library that sets `Spec.library LibraryTests.fable` gets its `tests/Fable`
+      suite run under Vitest in jsdom by `./build.sh -t Tests`.
+- [x] `Alma.Testing` runs its Fable.Mocha parity suite as `tests/Shared` through
+      the engine, keeping only its Vitest-output meta-tests in `tests/DotNet`.
 
 ## 11. Roadmap
 
@@ -646,7 +839,30 @@ cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 2. **Phase 2 (50–100 repos)** — Renovate for pull-based bumps, a migration
    catalog, monitoring.
 
+### Backlog
+
+- **SAFE test paths derived like `LibraryTests`.** `SAFEStackApplicationSpec`
+  keeps three test paths beside a separate `TestsSources` glob, which an
+  override of one can leave disagreeing with the other.
+- **`Bootstrap` in a repository without commits.** `Git.init` runs
+  `git rev-parse HEAD`, which fails before the first commit, so a new
+  repository needs an empty commit before its first `Bootstrap`.
+- **React component tests in SAFE-stack client tests.** `Vitest.ReactTestingLibrary`
+  tests of a component that imports CSS, run under the jsdom suite. Its
+  `Vitest.describe`/`Vitest.test` register on import rather than through the
+  entry's `register`, so they need a way into the one list `Client.Tests.fs`
+  registers, and React's production build, where `act` throws, is another
+  reason to keep `NODE_ENV=test`.
+- **Vitest browser mode (Playwright) for SAFE-stack client tests.** A further
+  `VitestConfig.render` option (`browser.provider: "playwright"`, with
+  `@vitest/browser` and `playwright` installed and browsers fetched in CI) for
+  view tests that need a real browser.
+
 ## 12. Open questions and risks
+
+- **One job per suite, concurrently.** A library with several `DotNet` test
+  projects — this repository's unit and integration suites — runs them side by
+  side with interleaved output.
 
 - **Vendoring has no drift detection.** Nothing records which version a repo's
   `build.sh` or `fsharplint.json` came from, and `Bootstrap` overwrites

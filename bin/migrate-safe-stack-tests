@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""Moves a SAFE-stack application's Fable.Mocha tests onto Alma.Testing, so `./build.sh -t Tests` runs the
+client tests under Vitest in jsdom and the shared tests on .NET too.
+
+Alma.Testing keeps Fable.Mocha's (and Expecto's) test API: under Fable its `register` hands a test
+tree to Vitest, which Alma.Build runs the client tests with; on .NET every name is Expecto's, so a
+shared test file needs no `#if`. Test code stays as it is, so the pass is a find-and-replace:
+
+- `open Fable.Mocha`, and the `#if FABLE_COMPILER open Fable.Mocha #else open Expecto #endif`
+  block, become `open Alma.Testing`;
+- `Mocha.runTests tests` (also inside an `[<EntryPoint>]`) becomes `register tests`. Vitest runs
+  only `Client.Tests.fs` (the SAFE template's runner), so a runner with another name is renamed to
+  it, and a second runner is reported for its tests to join the list `Client.Tests.fs` registers;
+  every other file keeps its name;
+- `Fable.Mocha` becomes `Alma.Testing` in paket.references and paket.dependencies;
+- the page and Vite config that served Fable.Mocha's tests in a browser are deleted;
+- the shared tests are added to the server's Expecto entry point, so they run on .NET too;
+- the Node requirement is added to the README's Requirements section.
+
+It then runs `dotnet tool restore`, `dotnet paket install`, the npm changes (`vitest` and `jsdom` in,
+`mocha` and `global-jsdom` out), `Bootstrap` (renders the client tests' Vitest config) and `Tests`, and
+checks the result: one `register`, no Fable.Mocha left, the server's Expecto total against the baseline, the
+Vitest total and the Vitest config.
+
+Everything the commands print goes to migration.log in the directory given as --work-dir (create it outside the
+worktree, for example with `mktemp -d`, and pass the same one to every call); the report and the baseline test
+count a rerun needs are kept there too. The script prints only migration-report.md, which lists what was done,
+what is left for you, and the checks. Before changing anything the script lists what it needs from you.
+
+Run from the project root of a clean working tree; after a failed run, or after you did what the script
+asked, rerun it with `--rerun`, which continues on the tree as it is. Review with `git diff`; a run that
+started clean can be undone with `git checkout -- . && git clean -fd`.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import migration  # noqa: E402
+from migration import (  # noqa: E402
+    EXPECT_FUNCTIONS, add_node_to_ci, add_readme_node, alma_testing_ask, build, fscheck_ask,
+    log_text, must, npm_ask, require_clean_tree, stop_with_asks, test_count, vite_ask, write_report,
+)
+
+SKIPPED_DIRECTORIES = {"bin", "obj", "output", "node_modules", "fable_modules", ".git"}
+
+OPEN_BLOCKS = [
+    re.compile(r"#if\s+FABLE_COMPILER\s*\n\s*open Fable\.Mocha\s*\n\s*#else\s*\n\s*open Expecto\s*\n\s*#endif"),
+    re.compile(r"#if\s+!FABLE_COMPILER\s*\n\s*open Expecto\s*\n\s*#else\s*\n\s*open Fable\.Mocha\s*\n\s*#endif"),
+]
+ENTRY_POINT = re.compile(r"(?m)^[ \t]*\[<EntryPoint>\][ \t]*\n[ \t]*let main \w+ =\s*Mocha\.runTests (.+?)[ \t]*$")
+RUN_TESTS = re.compile(r"(?m)^([ \t]*)Mocha\.runTests (.+?)[ \t]*(\|>[ \t]*ignore)?[ \t]*$")
+
+
+ENTRY = "Client.Tests.fs"
+
+
+def runs_under_vitest(name):
+    return name == ENTRY
+
+
+def registers(text):
+    return re.search(r"(?m)^register ", text) is not None
+
+
+def uses_fable_mocha(text):
+    code = re.sub(r"//.*", "", text)
+    return "Fable.Mocha" in code or "Mocha.runTests" in code
+
+
+def sources():
+    for path in sorted(Path("tests").rglob("*")):
+        if path.is_file() and not SKIPPED_DIRECTORIES & set(path.parts):
+            yield path
+
+
+def migrate_source(text):
+    for block in OPEN_BLOCKS:
+        text = block.sub("open Alma.Testing", text)
+    text = re.sub(r"(?m)^([ \t]*)open Fable\.Mocha[ \t]*$", r"\1open Alma.Testing", text)
+    text = ENTRY_POINT.sub(r"register \1", text)
+    return RUN_TESTS.sub(r"\1register \2", text)
+
+
+def leftovers(path, text):
+    entries = []
+    for number, line in enumerate(text.split("\n"), 1):
+        if line.lstrip().startswith("//"):
+            continue
+        for found in re.finditer(r"\bExpect\.(\w+)", line):
+            if found.group(1) not in EXPECT_FUNCTIONS:
+                entries.append(f"{path}:{number}: Expect.{found.group(1)} is not in Alma.Testing; express it with Expect.isTrue or another Expect function")
+        if re.search(r"\bMocha\.\w+", line):
+            entries.append(f"{path}:{number}: Fable.Mocha runner call left; the test entry module should call `register tests` at the top level")
+        if re.search(r"\b(SyncTest|AsyncTest|TestListSequential|FocusState)\b", line):
+            entries.append(f"{path}:{number}: Fable.Mocha's test tree types are not Alma.Testing's; use testCase / testList / ptestCase / ftestCase")
+    return entries
+
+
+def rename_entry(path):
+    """Renames a module that now calls `register` to `Client.Tests.fs`, in its project too, unless Vitest
+    already runs it."""
+    renamed = path.with_name(ENTRY)
+    if runs_under_vitest(path.name):
+        return path, None
+    if renamed.exists():
+        return path, f"{path}:1: Vitest runs only {renamed}; add this module's tests to the list it registers and drop `register` here"
+    path.rename(renamed)
+    for project in path.parent.glob("*.fsproj"):
+        project.write_text(project.read_text().replace(f'Include="{path.name}"', f'Include="{renamed.name}"'))
+    return renamed, None
+
+
+def shared_test_lists():
+    """`Module.value` of each test list declared with Alma.Testing in tests/Shared."""
+    lists = []
+    for path in sorted(Path("tests/Shared").glob("*.fs")):
+        text = path.read_text()
+        module = re.search(r"(?m)^module\s+([\w.]+)", text)
+        if module and "open Alma.Testing" in text:
+            lists += [f"{module.group(1)}.{name}" for name in re.findall(r"(?m)^let (\w+) =\s*testList\b", text)]
+    return lists
+
+
+def server_runs(test_list):
+    code = lambda text: re.sub(r"//.*", "", text)
+    return any(re.search(rf"\b{re.escape(test_list)}\b", code(path.read_text())) for path in Path("tests/Server").glob("*.fs"))
+
+
+BROWSER_RUNNER = ("index.html", "vite.config.mts", "vite.config.js", "vite.config.ts")
+EXPECTO_ENTRY = re.compile(r"(?m)^([ \t]*)(?:Tests\.)?runTestsInAssemblyWithCLIArgs\s+(\[[^\]\n]*\])\s+(\w+)[ \t]*$")
+
+
+def delete_browser_runner():
+    """Deletes the page and Vite config that served Fable.Mocha's tests in a browser."""
+    client = Path("tests/Client")
+    deleted = [path for path in sorted(client.glob("*")) if path.name in BROWSER_RUNNER]
+    for path in deleted:
+        path.unlink()
+        for project in client.glob("*.fsproj"):
+            project.write_text(re.sub(rf'(?m)^[ \t]*<None Include="{re.escape(path.name)}"\s*/>\n', "", project.read_text()))
+    return deleted
+
+
+def run_shared_on_server(test_lists):
+    """Adds the shared tests to the server's Expecto run; returns what it could not do."""
+    server_projects = sorted(Path("tests/Server").glob("*.fsproj"))
+    shared_projects = sorted(Path("tests/Shared").glob("*.fsproj"))
+    if not server_projects or not shared_projects:
+        return "no server or shared test project found"
+    project = server_projects[0]
+    reference = f"..\\Shared\\{shared_projects[0].name}"
+    text = project.read_text()
+    if shared_projects[0].name not in text:
+        anchor = list(re.finditer(r'(?m)^([ \t]*)<ProjectReference Include="[^"]+"\s*/>\n', text))
+        if not anchor:
+            return f"{project}: add <ProjectReference Include=\"{reference}\" />"
+        line = f'{anchor[-1].group(1)}<ProjectReference Include="{reference}" />\n'
+        project.write_text(text[: anchor[-1].end()] + line + text[anchor[-1].end():])
+    for entry in sorted(Path("tests/Server").glob("*.fs")):
+        code = entry.read_text()
+        found = EXPECTO_ENTRY.search(code)
+        entry_point = list(re.finditer(r"(?m)^[ \t]*\[<EntryPoint>\][ \t]*\n", code[: found.start()])) if found else []
+        if found and entry_point:
+            at = entry_point[-1].start()
+            hooks = "".join(f"[<Tests>]\nlet sharedTests{'' if i == 0 else i + 1} = {name}\n\n" for i, name in enumerate(test_lists))
+            code = code[:at] + hooks + code[at:]
+            if not re.search(r"(?m)^open Expecto[ \t]*$", code):
+                code = re.sub(r"(?m)^(module [^\n]*\n\n?)", r"\1open Expecto\n", code, count=1)
+            entry.write_text(code)
+            return None
+    return "the server's Expecto entry point is not a plain runTestsInAssemblyWithCLIArgs call"
+
+
+def migrate_files(arguments, done, edits):
+    """The find-and-replace pass over tests/ and the dependency files."""
+    dependencies = Path("paket.dependencies")
+    text = dependencies.read_text()
+    constraint = arguments.alma_testing if re.search(r"(?m)^\s*nuget Fable\.Mocha\b", text) else None
+
+    for path in sources():
+        if path.suffix == ".fs":
+            original = path.read_text()
+            if not uses_fable_mocha(original):
+                continue
+            migrated = migrate_source(original)
+            path.write_text(migrated)
+            if registers(migrated):
+                path, problem = rename_entry(path)
+                if problem:
+                    edits.append(problem)
+            done.append(f"{path}: now on Alma.Testing")
+            edits += leftovers(path, migrated)
+        elif path.name == "paket.references":
+            lines = path.read_text().splitlines()
+            if "Fable.Mocha" in (line.strip() for line in lines):
+                kept = [line.replace("Fable.Mocha", "Alma.Testing") for line in lines if line.strip() != "Alma.Testing"]
+                path.write_text("\n".join(kept) + "\n")
+                done.append(f"{path}: Fable.Mocha replaced by Alma.Testing")
+
+    if constraint:
+        dependencies.write_text(re.sub(r"(?m)^(\s*)nuget Fable\.Mocha\b.*$", rf"\1nuget Alma.Testing {constraint}", text))
+        done.append(f"paket.dependencies: Fable.Mocha replaced by Alma.Testing {constraint}")
+
+    for path in delete_browser_runner():
+        done.append(f"{path}: deleted, it served the tests in a browser for Fable.Mocha (WatchTests runs Vitest's watch mode now)")
+
+    unrun = [test_list for test_list in shared_test_lists() if not server_runs(test_list)]
+    if unrun:
+        problem = run_shared_on_server(unrun)
+        if problem is None:
+            done.append(f"tests/Server: the Expecto entry point's file now marks {', '.join(unrun)} with [<Tests>], so they run on .NET too")
+        else:
+            edits.append(
+                f"tests/Server: run {', '.join(unrun)} on .NET too ({problem}): reference tests/Shared from the server test "
+                f"project and mark each list with Expecto's `[<Tests>]` in its entry point's file, e.g. "
+                f"`[<Tests>] let sharedTests = {unrun[0]}`"
+            )
+    return unrun
+
+
+def preflight(arguments):
+    """Everything the script will demand, gathered before it changes anything so the asks arrive at once."""
+    asks = []
+    if not Path("tests/Client").is_dir():
+        asks.append("there is no tests/Client; for a library use bin/migrate-library-fable-tests")
+    if "defaultSAFEStackApplication" not in Path("build/Build.fs").read_text():
+        asks.append("build/Build.fs does not create a SAFE-stack spec (`Spec.defaultSAFEStackApplication`)")
+    dependencies = Path("paket.dependencies").read_text()
+    pin = re.search(r"(?m)^[ \t]*nuget Alma\.Build[ \t]+(\S.*)$", dependencies)
+    if not pin or int((re.search(r"\d+", pin.group(1)) or re.search(r"\d+", "0")).group(0)) < 4:
+        asks.append("move the repository to Alma.Build 4 first (bin/migrate-to-alma-build); client tests under Vitest need it")
+    if not re.search(r"(?m)^\s*nuget Fable\.Mocha\b", dependencies):
+        ask = alma_testing_ask(arguments)
+        asks += [ask] if ask else []
+    vite = None if arguments.upgrade_vite else vite_ask("pass --upgrade-vite to move it to Vite 8")
+    asks += [ask for ask in [npm_ask(), vite, fscheck_ask()] if ask]
+    stop_with_asks(asks)
+
+
+def run_checks(before, output, unrun):
+    sources_text = " ".join(path.read_text() for path in sources() if path.suffix in (".fs", ".references"))
+    registers_in_client = sum(len(re.findall(r"(?m)^register\b", path.read_text())) for path in Path("tests/Client").glob("*.fs"))
+    server = sorted(Path("tests/Server").glob("*.fsproj"))
+    after = test_count(server[0].parent) if server else None
+    vitest = [int(count) for count in re.findall(r"Tests\s+(?:\d+ failed \| )?(?:\d+ skipped \| )?(\d+) passed", output)]
+    failed = bool(re.search(r"Tests\s+\d+ failed", output))
+    warnings = len(re.findall(r"warning FABLE", output))
+    checks = [
+        ("Fable.Mocha" not in sources_text and "Mocha.runTests" not in sources_text, "no Fable.Mocha is left under tests/"),
+        (registers_in_client == 1, f"tests/Client has {registers_in_client} `register` line(s), expected 1 (Client.Tests.fs)"),
+        (Path("tests/Client/vitest.config.mts").exists(), "tests/Client/vitest.config.mts is rendered"),
+        (bool(vitest) and not failed, f"Vitest reported {', '.join(map(str, vitest)) or 'no totals'} passed tests" + (" and some failed" if failed else "")),
+    ]
+    if before is not None and after is not None:
+        checks.append((after >= before and (after > before or not unrun),
+                       f"the server's Expecto run has {after} tests, {before} before the move (the difference are the shared tests)"))
+    checks.append((True, f"{warnings} `warning FABLE` line(s) in the Tests output (informational for an application)"))
+    return checks
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--alma-testing", default="~> 1.0", help="Alma.Testing constraint (default: ~> 1.0)")
+    parser.add_argument("--upgrade-vite", action="store_true", help="also move the client to Vite 8 and @vitejs/plugin-react 6 (see bin/upgrade-vite)")
+    parser.add_argument("--setup-node", default="actions/setup-node@v4", help="the action the CI step uses")
+    parser.add_argument("--work-dir", required=True, help="directory for the log, report and baseline; create it outside the worktree (mktemp -d) and pass the same one to every call")
+    parser.add_argument("--rerun", action="store_true", help="continue after a failed run, or after adding what the script asked for, on the tree as it is")
+    arguments = parser.parse_args()
+    migration.use_work_dir(arguments.work_dir)
+
+    if not Path("build/Build.fs").exists() or not Path("paket.dependencies").exists() or not Path("tests").is_dir():
+        raise SystemExit("Run from the project root of an Alma.Build repository with a tests/ directory.")
+    require_clean_tree(arguments.rerun)
+    preflight(arguments)
+
+    if arguments.rerun and migration.REPORT.exists():
+        migration.REPORT.replace(migration.PREVIOUS)
+    elif not arguments.rerun:
+        migration.PREVIOUS.unlink(missing_ok=True)
+
+    before = None
+    server = sorted(Path("tests/Server").glob("*.fsproj"))
+    if server and uses_fable_mocha(" ".join(path.read_text() for path in sources() if path.suffix == ".fs")) and not migration.BASELINE.exists():
+        must(["dotnet", "tool", "restore"])
+        must(["dotnet", "paket", "restore"])
+        must(build("AssemblyInfo"))
+        before = test_count(server[0].parent)
+        if before is not None:
+            migration.BASELINE.write_text(f"{before}\n")
+            print(f"{before} server tests before the move")
+    if before is None and migration.BASELINE.exists():
+        before = int(migration.BASELINE.read_text())
+
+    done, edits, review = [], [], []
+    unrun = migrate_files(arguments, done, edits)
+    add_readme_node(done, edits)
+    add_node_to_ci(arguments.setup_node, done, edits)
+    write_report(done, edits, review, None)
+
+    try:
+        packages = json.loads(Path("package.json").read_text()).get("devDependencies", {})
+    except (OSError, ValueError):
+        packages = {}
+    obsolete = [name for name in ("mocha", "global-jsdom") if name in packages]
+    upgrade = migration.vite_upgrade(done, edits, review) if arguments.upgrade_vite else []
+    if upgrade:
+        edits.append("src/Client: run ./build.sh Bundle and open the app; for the bundle-size comparison, run bin/upgrade-vite instead of --upgrade-vite")
+        write_report(done, edits, review, None)
+    for command in (["dotnet", "tool", "restore"], ["dotnet", "paket", "install"],
+                    *([["npm", "uninstall", *obsolete]] if obsolete else []),
+                    ["npm", "install", "--save-dev", f"vitest@{migration.VITEST}", "jsdom", *upgrade], build("Bootstrap")):
+        must(command)
+    start = migration.LOG.stat().st_size
+    must(build("Tests"))
+
+    checks = run_checks(before, log_text(start), unrun)
+    write_report(done, edits, review, checks)
+    print("\n" + migration.REPORT.read_text() + f"\nFull output: {migration.LOG}")
+    if not all(ok for ok, _ in checks):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

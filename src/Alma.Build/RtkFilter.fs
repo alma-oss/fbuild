@@ -251,12 +251,17 @@ module internal RtkFilter =
         let fsharplint (repoRoot: string): Filter =
             fsharplintSummary repoRoot |> okWhenEmpty "fsharplint: ok"
 
+        let private ansiEscape = Regex @"\x1b\[[0-9;?]*[A-Za-z]"
+
+        let private withoutAnsi (line: string) = ansiEscape.Replace (line, "")
+
         /// `dotnet fable` prints a banner, plugin loads, and per-file progress, closing a clean run
         /// with `Compiled N/M: <file>` and `Fable compilation finished in <ms>ms` — a few hundred
-        /// lines with no diagnostics. A successful run collapses to that tally; a failing one shows
-        /// its raw output, since a compile error is not shaped like an MSBuild diagnostic and must
-        /// never be summarised away. Fable prints diagnostic paths relative to its cwd already, so
-        /// there is nothing to relativize.
+        /// lines with no diagnostics. A successful run collapses to that tally, plus the `Test Files`
+        /// and `Tests` summary of a Vitest run started through `--run`; a failing one shows its raw
+        /// output, since neither a compile error nor a failing test's stack is shaped like an MSBuild
+        /// diagnostic, and either must never be summarised away. Fable prints diagnostic paths
+        /// relative to its cwd already, so there is nothing to relativize.
         module private Fable =
             let private compiledTally = Regex @"^Compiled (\d+)/(\d+):"
             let private finishedIn = Regex @"Fable compilation finished in (\d+)ms"
@@ -280,14 +285,40 @@ module internal RtkFilter =
             let isDiagnostic (line: string) =
                 Regex.IsMatch (line, @"\b(error|warning)\b", RegexOptions.IgnoreCase)
 
+            let vitestSummary (lines: string list) =
+                lines
+                |> List.filter (fun line -> Regex.IsMatch (line, @"^\s*(Test Files|Tests)\s{2,}\S"))
+                |> List.map (fun line -> line.Trim ())
+
         let fable: Filter =
             create (fun lines exitCode ->
                 if exitCode <> 0 then
                     lines
                 else
+                    let lines = lines |> List.map withoutAnsi
+
                     match lines |> List.filter Fable.isDiagnostic |> List.distinct with
-                    | [] -> Fable.summary lines |> Option.defaultValue "fable: ok" |> List.singleton
+                    | [] -> (Fable.summary lines |> Option.defaultValue "fable: ok") :: Fable.vitestSummary lines
                     | diagnostics -> diagnostics
+            )
+
+        /// A test run collapses to Expecto's `EXPECTO! … tests run …` summary, or `tests: ok` from a
+        /// runner that prints none; a failing one shows its raw output, so the failing test's name and
+        /// message are never summarised away.
+        let tests: Filter =
+            create (fun lines exitCode ->
+                if exitCode <> 0 then
+                    lines
+                else
+                    lines
+                    |> List.map withoutAnsi
+                    |> List.choose (fun line ->
+                        match line.IndexOf "EXPECTO! " with
+                        | -1 -> None
+                        | index -> Some (sprintf "tests: %s" (line.Substring(index + "EXPECTO! ".Length).Replace(" <Expecto>", "").Trim ())))
+                    |> function
+                        | [] -> [ "tests: ok" ]
+                        | summaries -> summaries
             )
 
     /// Splitting a newline-terminated output yields an empty final line; dropping it here keeps

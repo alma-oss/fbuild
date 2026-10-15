@@ -318,6 +318,84 @@ let fableTests =
 
             Expect.equal result [ "fable: ok" ] "a clean run with no tally still collapses to ok"
         }
+
+        test "should collapse a clean run to its tally when Fable colours its lines" {
+            let coloured = cleanRun |> List.map (fun line -> $"\u001b[32m{line}\u001b[0m")
+
+            let result = filtered filter 0 coloured
+
+            Expect.equal result [ "fable: compiled 198/198 in 13684ms" ] "colour codes do not hide the tally"
+        }
+
+        test "should keep Vitest's summary after the tally when a clean run ran tests" {
+            let vitestRun =
+                cleanRun @ [
+                    " ✓ output/Shared.Tests.js (1 test) 8ms"
+                    ""
+                    " Test Files  1 passed (1)"
+                    "      Tests  1 passed (1)"
+                    "   Start at  11:10:29"
+                ]
+
+            let result = filtered filter 0 vitestRun
+
+            Expect.equal
+                result
+                [ "fable: compiled 198/198 in 13684ms"; "Test Files  1 passed (1)"; "Tests  1 passed (1)" ]
+                "a passing test run reports how many files and tests passed"
+        }
+
+        test "should show raw output with the failing test's stack when a test run fails" {
+            let failingRun =
+                cleanRun @ [
+                    " ❯ output/Shared.Tests.js (1 test | 1 failed) 15ms"
+                    "   × Shared > should double the value when given a number 12ms"
+                    " ❯ Shared.Tests.fs:9:13"
+                    "      Tests  1 failed (1)"
+                ]
+
+            let result = filtered filter 1 failingRun
+
+            Expect.equal result failingRun "a failing test keeps its name and its .fs line"
+        }
+    ]
+
+[<Tests>]
+let testsTests =
+    let filter = Filter.tests
+
+    let expectoRun = [
+        "\u001b[37m[\u001b[37m11:07:19 \u001b[37mINF\u001b[37m] \u001b[37mEXPECTO? Running tests... <Expecto>"
+        "\u001b[1000D\u001b[?25h[11:07:19 INF] EXPECTO! 2 tests run in 00:00:00.21 for All – 2 passed, 0 ignored, 0 failed, 0 errored. Success! <Expecto>"
+    ]
+
+    testList "Filter.tests" [
+        test "should collapse a clean run to Expecto's summary when the runner is Expecto" {
+            let result = filtered filter 0 expectoRun
+
+            Expect.equal
+                result
+                [ "tests: 2 tests run in 00:00:00.21 for All – 2 passed, 0 ignored, 0 failed, 0 errored. Success!" ]
+                "a passing Expecto run reduces to its summary, without colour codes"
+        }
+
+        test "should report ok when a clean run printed no Expecto summary" {
+            let result = filtered filter 0 [ "Passed!" ]
+
+            Expect.equal result [ "tests: ok" ] "another runner's clean run collapses to ok"
+        }
+
+        test "should show raw output when the run fails" {
+            let failingRun = [
+                "[11:10:03 ERR] All.Shared.should double the value when given a number failed in 00:00:00.01."
+                "Doubling 21 must give 42."
+                "   at Expecto.Expect.equal"
+            ]
+
+            let result = filtered filter 1 failingRun
+
+            Expect.equal result failingRun "a failing test keeps its name and message"
+        }
     ]
 
 [<Tests>]

@@ -6,8 +6,6 @@ export default defineConfig({
     build: {
         outDir: "../../deploy/public",
         emptyOutDir: true,
-        minify: "esbuild",
-        target: "es2020",
     },
     clearScreen: false,
 });

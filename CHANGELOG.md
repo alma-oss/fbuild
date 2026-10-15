@@ -2,6 +2,23 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- [**BC**] Replace `Spec.defaultLibrary` with `Spec.library`, which takes the library's tests, and remove the library `TestsSources` field
+    - `LibraryTests.dotNet` for tests in `tests/*.fsproj`
+    - `LibraryTests.noTests`
+    - `LibraryTests.dotNetAndFable` for `tests/Shared` and `tests/DotNet`
+    - `LibraryTests.fable` for `tests/Fable` alone, in a library that only exists under Fable
+    - `LibraryTests.DotNet (<glob>)` for a custom glob
+- [**BC**] Run SAFE-stack client tests under Vitest: move them from Fable.Mocha to `Alma.Testing` with `bin/migrate-safe-stack-tests` in the engine repository, replace `mocha` with `vitest` and `jsdom` in your `devDependencies`, then run `Bootstrap` and commit `tests/Client/vitest.config.mts`
+- [**BC**] Rename `InstallClient` target to `InstallNpm`
+- [**BC**] Grant test projects access to a project's internal code by their own assembly name instead of a fixed `tests`; a test project outside the spec's tests loses that access
+- Add Vitest tests of a library's Fable-compiled code, `tests/Shared` in node or `tests/Fable` in jsdom; migrate with `bin/migrate-library-fable-tests` in the engine repository, see `docs/migration/fable-tests/SKILL.md`
+- Allow `WatchTests` and `Tests` for every project type
+- Run a project's test suites concurrently in `Tests`
+- Show a failing test's full output
+- `bin/migrate-safe-stack-tests` and `bin/migrate-library-fable-tests` install Vitest 5, which Alma.Testing 1.0.0-preview.4 needs; a SAFE-stack application on Vite older than 6.4 passes `--upgrade-vite` to the former
+- `bin/migrate-safe-stack-tests` and `bin/migrate-library-fable-tests` stop on Expecto.FsCheck 10 or FsCheck 2 until the tests move to Expecto.FsCheck 11 and FsCheck 3, see `docs/migration/fable-tests/references/fscheck.md`
+- Add `bin/upgrade-vite` in the engine repository, moving a project onto Vitest 5 and a SAFE-stack client onto Vite 8 and `@vitejs/plugin-react` 6
+- Add `bin/migrate-to-alma-build` in the engine repository, moving a repository from the hand-copied FAKE build onto `Alma.Build` 4
 
 ## 3.1.0 - 2026-10-14
 - Fix `RaspberryPiHassioAddon` to use real framework target `linux-musl-arm64`

@@ -1,11 +1,8 @@
-module Fixture.Client.Tests
+module Fixture.Test.Client.Tests
 
-open Fable.Mocha
+open Alma.Testing
+open Fixture.Test
 
-let tests =
-    testList "Client" [
-        testCase "should pass the fixture assertion" <| fun _ ->
-            Expect.equal 1 1 "Fixture assertion must pass"
-    ]
+let tests = testList "Client" [ Rendering.tests; Shared.Tests.tests ]
 
-Mocha.runTests tests |> ignore
+register tests

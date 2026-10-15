@@ -51,6 +51,50 @@ module Targets =
                 releaseSource
             ]
 
+    [<RequireQualifiedAccess>]
+    module internal TestAssembly =
+        let private declaredName =
+            Text.RegularExpressions.Regex @"<AssemblyName>\s*([^<$]+?)\s*</AssemblyName>"
+
+        /// The literal `<AssemblyName>` a project file sets, or the file's name without its extension,
+        /// which is what MSBuild names the assembly otherwise.
+        let name (projectPath: string) (projectXml: string) =
+            match declaredName.Match projectXml with
+            | declared when declared.Success -> declared.Groups[1].Value
+            | _ -> Path.GetFileNameWithoutExtension projectPath
+
+    [<RequireQualifiedAccess>]
+    module internal FableSuites =
+        /// Whether the suite still references Fable.Mocha, whose browser check makes it render its
+        /// results instead of registering tests in Vitest's jsdom environment.
+        let usesFableMocha suitePath =
+            let references = suitePath </> "paket.references"
+
+            File.Exists references
+            && File.ReadAllLines references |> Array.exists (fun line -> line.Trim () = "Fable.Mocha")
+
+        let npmPrerequisites (suites: FableTestSuite list) =
+            match suites with
+            | [] -> []
+            | suites ->
+                [
+                    "vitest"
+                    if suites |> List.exists (fun suite -> suite.Environment = VitestEnvironment.Jsdom) then "jsdom"
+                ]
+
+        /// `Build` has restored every project before a suite runs. `fable --run` forces `NODE_ENV=production` on the
+        /// command it runs, and `env` resets it: under `production`, Vite reports a production build.
+        let fableArguments (vitestArguments: string list) =
+            [ "-o"; "output"; "-s"; "--noRestore"; "--run"; "env"; "NODE_ENV=test"; "npx"; "vitest" ] @ vitestArguments
+
+    [<RequireQualifiedAccess>]
+    module internal DotNetSuite =
+        let testsArguments project = [ "--no-build"; "--project"; project ]
+
+        /// A suite names its project by file or by directory.
+        let watchDirectory project =
+            if Directory.Exists project then project else Path.getDirectory project
+
     // --------------------------------------------------------------------------------------------------------
     // 2. Targets for FAKE
     // --------------------------------------------------------------------------------------------------------
@@ -62,11 +106,8 @@ module Targets =
                 Shell.cleanDir safe.DeployPath
                 // Delete *.fs.js files created by Fable
                 run (Dotnet Fable) [ "clean"; "--yes" ] safe.ClientPath
-            )
-
-            Target.create "InstallClient" (fun _ ->
-                run (Npm Version) [] "."
-                run (Npm Install) [] "."
+                // Output compiled against other Fable or package versions can import modules the current ones lack
+                Shell.deleteDir (safe.ClientPath </> "output")
             )
 
             Target.create "Bundle" (fun _ ->
@@ -96,41 +137,20 @@ module Targets =
                 |> runParallel
             )
 
-            Target.create "WatchTests" (fun _ ->
-                run (Dotnet Build) [] safe.SharedTestsPath
-
-                [
-                    toJob (JobName "server") (Dotnet WatchRun) [] safe.ServerTestsPath
-                    toJob (JobName "client") (Dotnet FableWatch) [ "-o"; "output"; "-s"; "--run"; "npx"; "vite" ] safe.ClientTestsPath
-                ]
-                |> runParallel
-            )
-
-            Target.create "Tests" (fun _ ->
-                run (Dotnet Build) [] safe.SharedTestsPath
-
-                [
-                    toJob (JobName "server") (Dotnet Tests) [] safe.ServerTestsPath
-                    toJob (JobName "client") (Dotnet Fable) [ "-o"; "output"; "-s"; "--run"; "npx"; "mocha"; "output" ] safe.ClientTestsPath
-                ]
-                |> runParallel
-            )
-
             [
                 "SafeClean"
                     ==> "Clean"
 
                 "SafeClean"
                     ==> "AssemblyInfo"
-                    ==> "InstallClient"
+                    ==> "InstallNpm"
                     ==> "Build"
-
-                "Tests"
+                    ==> "Lint"
+                    ==> "Tests"
                     ==> "Bundle"
 
-                "Build"
-                    ==> "Lint"
-                    ==> "Tests" <=> "WatchTests"
+                "Lint"
+                    ==> "WatchTests"
 
                 "Build"
                     ==> "Run" <=> "RunMirrord"
@@ -138,6 +158,9 @@ module Targets =
 
     let init (definition: ProjectDefinition) =
         Target.initEnvironment ()
+
+        let testSuites = definition.Specs.TestSuites
+        let fableSuites = testSuites |> TestSuite.fableSuites
 
         let buildRuntimeIdentifier =
             match definition.Specs.RuntimeConfiguration with
@@ -147,12 +170,14 @@ module Targets =
                 | Ok runtimeIdentifier -> runtimeIdentifier
                 | Error error -> error |> RuntimeConfigurationError.format |> failwith
 
-        let run command arguments directory =
-            // If building for a specific runtime and the runtime props file is missing, fail early.
+        let requireRuntimeProps command =
             match buildRuntimeIdentifier with
             | Some _ when CommandArguments.takesRuntimeIdentifier command && not (File.exists RuntimeProps.path) ->
                 failwithf "%s is missing. Building for a specific runtime needs it. Run the Bootstrap target first." RuntimeProps.path
             | _ -> ()
+
+        let run command arguments directory =
+            requireRuntimeProps command
 
             Command.run command (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments) directory
 
@@ -206,6 +231,12 @@ module Targets =
         )
 
         Target.create "AssemblyInfo" (fun _ ->
+            let testAssemblies =
+                definition.Sources.Tests
+                |> Seq.map (fun project -> TestAssembly.name project (File.ReadAllText project))
+                |> Seq.distinct
+                |> List.ofSeq
+
             let getAssemblyInfoAttributes projectName =
                 let now = DateTime.Now
 
@@ -236,7 +267,8 @@ module Targets =
                         AssemblyInfo.Version "1.0"
                         AssemblyInfo.FileVersion "1.0"
 
-                    AssemblyInfo.InternalsVisibleTo "tests"
+                    for testAssembly in testAssemblies do
+                        AssemblyInfo.InternalsVisibleTo testAssembly
 
                     match definition.Project.Git with
                     | None ->
@@ -304,14 +336,63 @@ module Targets =
             |> runParallelWith GroupedByJob
         )
 
-        if not definition.Specs.IsSAFEStack then
-            Target.create "Tests" (fun _ ->
-                match definition.Sources.Tests |> List.ofSeq with
-                | [] -> Trace.tracefn "There are no tests yet."
-                | projects ->
-                    projects
-                    |> List.iter (fun project -> run (Dotnet Tests) [ "--no-build"; "--project"; project ] ".")
+        Target.create "InstallNpm" (fun _ ->
+            if not fableSuites.IsEmpty then
+                runInRoot (Npm Version) []
+                runInRoot (Npm Install) []
+            else
+                Trace.tracefn "No Fable test suite or SAFE-stack client; nothing to install with npm."
+        )
+
+        let prepareFableSuites () =
+            fableSuites |> List.iter (fun suite ->
+                let config = VitestConfig.path suite
+
+                if not (File.exists config) then
+                    failwithf "%s is missing. The tests in %s run under it. Run the Bootstrap target first." config suite.Path
+
+                if FableSuites.usesFableMocha suite.Path then
+                    failwithf
+                        "%s still references Fable.Mocha. Move the tests to Alma.Testing (see Alma.Build's README, \"Fable tests\")."
+                        (suite.Path </> "paket.references")
             )
+
+            let prerequisites = FableSuites.npmPrerequisites fableSuites
+
+            // `npm ls` exits zero when any one of several names is installed, so each is probed on its own.
+            if not (prerequisites |> List.forall (fun prerequisite -> succeeds (Npm Ls) [ "--depth=0"; prerequisite ] ".")) then
+                failwithf "Missing npm prerequisites, run `npm install --save-dev %s`" (String.concat " " prerequisites)
+
+            fableSuites |> List.iter (fun suite -> Shell.deleteDir (suite.Path </> "output"))
+
+        let runTestSuites watch =
+            let job (name: string) command arguments directory =
+                requireRuntimeProps command
+
+                toJob
+                    (JobName (Solution.relativeTo (Directory.GetCurrentDirectory ()) name))
+                    command
+                    (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments)
+                    directory
+
+            match testSuites with
+            | [] -> Trace.tracefn "There are no tests yet."
+            | suites ->
+                prepareFableSuites ()
+
+                suites
+                |> List.map (function
+                    | TestSuite.DotNet project when watch -> job project (Dotnet WatchRun) [] (DotNetSuite.watchDirectory project)
+                    | TestSuite.DotNet project -> job project (Dotnet Tests) (DotNetSuite.testsArguments project) "."
+                    | TestSuite.Fable suite when watch -> job suite.Path (Dotnet FableWatch) (FableSuites.fableArguments []) suite.Path
+                    | TestSuite.Fable suite -> job suite.Path (Dotnet Fable) (FableSuites.fableArguments [ "run" ]) suite.Path
+                )
+                |> runParallel
+
+        Target.create "Tests" (fun _ -> runTestSuites false)
+        Target.create "WatchTests" (fun _ -> runTestSuites true)
+
+        if not definition.Specs.IsSAFEStack then
 
             let zipRelease releaseDir runtimeTargets =
                 if releaseDir </> "zipCompiled" |> File.exists
@@ -463,22 +544,30 @@ module Targets =
             [
                 "Clean"
                     ==> "AssemblyInfo"
+                    ==> "InstallNpm"
                     ==> "Build"
                     ==> "Lint"
                     ==> "Tests"
                     ==> "Release"
                     ==> "Publish"
+
+                "Lint"
+                    ==> "WatchTests"
             ]
 
         | { Specs = ConsoleApplication _ } ->
             [
                 "Clean"
                     ==> "AssemblyInfo"
+                    ==> "InstallNpm"
                     ==> "Build"
                     ==> "Lint"
                     ==> "Tests"
                     ==> "Release"
                     ==> "ZipRelease"
+
+                "Lint"
+                    ==> "WatchTests"
 
                 "Build"
                     ==> "Watch" <=> "WatchMirrord" <=> "Run" <=> "RunMirrord"
@@ -488,10 +577,14 @@ module Targets =
             [
                 "Clean"
                     ==> "AssemblyInfo"
+                    ==> "InstallNpm"
                     ==> "Build"
                     ==> "Lint"
                     ==> "Tests"
                     ==> "Release" <=> "Watch" <=> "WatchMirrord" <=> "Run" <=> "RunMirrord"
+
+                "Lint"
+                    ==> "WatchTests"
             ]
 
         | { Specs = SAFEStackApplication safe } ->

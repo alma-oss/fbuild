@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""Moves a shared library's Expecto tests onto Alma.Build 4's layout, so `./build.sh -t Tests` runs
+them under Expecto on .NET and, for the shared ones, under Vitest after Fable compiles them.
+
+Does the mechanical part of docs/migration/fable-tests/SKILL.md:
+
+- pins Alma.Build in paket.dependencies and removes Fable.Mocha; before changing anything it lists what it needs
+  from you at once, among it the Alma.Testing line, which it never adds;
+- adds vitest to package.json and node_modules/ and output/ to .gitignore;
+- creates the Library spec with `Spec.library LibraryTests.dotNetAndFable` in build/Build.fs;
+- moves tests/<old>.fsproj to tests/DotNet/DotNet.Tests.fsproj (paths one level deeper, the runner
+  renamed DotNet.Tests.fs and made to run the Shared list too) and every shareable test file to
+  tests/Shared, where it opens Alma.Testing, loses [<Tests>] and is gathered by Shared.Tests.fs;
+- adds a setup-node step after setup-dotnet in each workflow that runs build.sh;
+- adds the Node requirement to the README's Requirements section;
+- runs paket, npm, Bootstrap, Solution, AssemblyInfo and Tests, then checks the result: the generated
+  AssemblyInfo grants, one `register`, no FsCheck in Shared, the baseline, Expecto and Vitest totals, and
+  the `warning FABLE` count.
+
+Everything the commands print goes to migration.log in the directory given as --work-dir (create it outside the
+worktree, for example with `mktemp -d`, and pass the same one to every call); the report, the baseline test count a
+rerun needs and the previous report are kept there too. The script prints only migration-report.md, which lists what
+was done, what is left for you, what it guessed, and the checks.
+
+A file is shared only when it holds a test list, uses nothing .NET-only (FsCheck, reflection, the file
+system, an Expect function Alma.Testing lacks) and opens no file that stays on .NET. Everything else
+stays in tests/DotNet and keeps running there; the report names what to split or rewrite by hand.
+
+Run from the project root of a clean working tree; after a failed run, fix the cause and rerun it
+with `--rerun`. Review with `git diff`; undo with `git checkout -- . && git clean -fd`.
+"""
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import migration  # noqa: E402
+from migration import (  # noqa: E402
+    ANSI, EXPECT_FUNCTIONS, add_node_to_ci, add_readme_node, alma_testing_ask, fscheck_ask,
+    build, expecto, log_text, module_name, move, must, npm_ask, require_clean_tree, run,
+    stop_with_asks, test_count, test_count_of, vite_ask, write_report,
+)
+
+DOTNET_ONLY = re.compile(
+    r"\b(testProperty\w*|ptestProperty|ftestProperty|testTask|testTheory|testFixture\w*|testParam|"
+    r"FsCheck|Arb\.|Gen\.|Prop\.|System\.IO|System\.Reflection|typeof<|File\.|Directory\.|"
+    r"Environment\.|System\.Random|Random\(|Console\.|System\.Threading|Thread\.|Process\.|Async\.RunSynchronously)"
+)
+ALMA_TESTING_NAMES = {"Expect", "Test", "Tests", "Accuracy", "FocusState"}
+HELPER = "holds no test list"
+
+
+def classify(files):
+    """Splits test files into those that can move to tests/Shared and those that stay, with a reason each."""
+    texts = {path: path.read_text() for path in files}
+    shared, reasons = set(), {}
+    for path, text in texts.items():
+        code = re.sub(r"//.*", "", text)
+        missing = sorted({name for name in re.findall(r"\bExpect\.(\w+)", code)} - EXPECT_FUNCTIONS)
+        if "[<Tests>]" not in code:
+            reasons[path] = HELPER
+        elif module_name(text) is None:
+            reasons[path] = "declares no top-level module for Shared.Tests.fs to reference; share it by hand"
+        elif DOTNET_ONLY.search(code):
+            reasons[path] = f"uses .NET-only {DOTNET_ONLY.search(code).group(1)}; split its examples into tests/Shared by hand"
+        elif missing:
+            reasons[path] = f"uses Expect.{', Expect.'.join(missing)}, absent from Alma.Testing; rewrite to share it"
+        else:
+            shared.add(path)
+
+    def staying():
+        """Full names of the modules that stay on .NET; short names too for helper modules, which siblings
+        in the same namespace reference unqualified."""
+        for path in files:
+            name = module_name(texts[path])
+            if path not in shared and name:
+                yield name, rf"\b{re.escape(name)}\b" + ("" if "[<Tests>]" in texts[path] else rf"|\b{re.escape(name.split('.')[-1])}\.")
+
+    changed = True
+    while changed:
+        changed = False
+        for path in sorted(shared):
+            needs = [name for name, pattern in staying() if re.search(pattern, texts[path])]
+            if needs:
+                shared.discard(path)
+                reasons[path] = f"uses {needs[0]}, which stays on .NET"
+                changed = True
+    return [path for path in files if path in shared], reasons
+
+
+def deeper(project_text):
+    """Adds a directory level to every relative path in a project file."""
+    return re.sub(r'((?:Include|Project)=")(\.\.[\\/])', r"\1\2\2", project_text)
+
+
+def shared_project(references):
+    items = "\n".join(f'    <ProjectReference Include="{reference}" />' for reference in references)
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+{items}
+  </ItemGroup>
+
+  <ItemGroup>
+__COMPILE__
+  </ItemGroup>
+
+  <Import Project="..\\..\\.paket\\Paket.Restore.targets" />
+</Project>
+"""
+
+
+def restructure(old_project, done, edits, review):
+    tests = old_project.parent
+    text = old_project.read_text()
+    compiled = re.findall(r'<Compile Include="([^"]+)"', text)
+    runner = next((name for name in compiled if (tests / name).exists() and "[<EntryPoint>]" in (tests / name).read_text()), None)
+    if runner is None:
+        raise SystemExit(f"{old_project}: no compiled file holds the [<EntryPoint>]; move the tests by hand.")
+    candidates = [tests / name for name in compiled if name not in ("AssemblyInfo.fs", runner)]
+    shared, reasons = classify(candidates)
+    if not shared:
+        raise SystemExit("No test file can be shared as it is:\n" + "\n".join(f"  - {p}: {r}" for p, r in reasons.items()))
+
+    texts = {path: path.read_text() for path in shared}
+    lists, prefix = [], None
+    for path, source in texts.items():
+        name = module_name(source)
+        lists += [f"{name}.{value}" for value in re.findall(r"\[<Tests>\]\s*\n?\s*let\s+(\w+)", source)]
+        parent = name.rsplit(".", 1)[0] if "." in name else ""
+        prefix = parent if prefix is None else next(
+            (prefix[:i] for i in range(len(prefix), -1, -1) if parent.startswith(prefix[:i]) and (i == len(prefix) or prefix[i] == ".")), "")
+    entry_module = f"{prefix}.Shared.Tests" if prefix else "Shared.Tests"
+
+    outside = [(path, module_name(path.read_text())) for path in candidates]
+    for path, name in [(path, module_name(source)) for path, source in texts.items()] + outside:
+        if name is None:
+            edits.append(f"{path}: no module declaration; test modules belong under <Library.Namespace>.Test")
+        elif not prefix or not name.startswith(f"{prefix}."):
+            edits.append(f"{path}: module {name} is outside the shared test prefix{f' {prefix}' if prefix else ''}; test modules belong under <Library.Namespace>.Test")
+    imported = [name[len(prefix) + 1:] if prefix and name.startswith(f"{prefix}.") and name.split(".")[len(prefix.split("."))] not in ALMA_TESTING_NAMES else name for name in lists]
+
+    references = re.findall(r'<ProjectReference Include="([^"]+)"', deeper(text))
+    dotnet = Path("tests/DotNet")
+    project = deeper(text)
+    project = re.sub(r'(?m)^[ \t]*<Compile Include="AssemblyInfo\.fs"\s*/>\n', "", project)
+    for path in shared:
+        project = re.sub(rf'(?m)^[ \t]*<Compile Include="{re.escape(str(path.relative_to(tests)))}"\s*/>\n', "", project)
+    project = project.replace(f'<Compile Include="{runner}"', '<Compile Include="DotNet.Tests.fs"')
+    project = re.sub(r'(?m)^([ \t]*)(<ProjectReference Include="[^"]+"\s*/>)',
+                     r'\1\2\n\1<ProjectReference Include="../Shared/Shared.Tests.fsproj" />', project, count=1)
+    project = re.sub(r"(?m)^[ \t]*<ItemGroup>\s*</ItemGroup>\n\n?", "", project)
+
+    move(old_project, dotnet / "DotNet.Tests.fsproj")
+    (dotnet / "DotNet.Tests.fsproj").write_text(project)
+    if (tests / "paket.references").exists():
+        move(tests / "paket.references", dotnet / "paket.references")
+    move(tests / runner, dotnet / "DotNet.Tests.fs")
+    program = (dotnet / "DotNet.Tests.fs").read_text()
+    entry_point = re.search(r"(?m)^[ \t]*\[<EntryPoint>\][ \t]*\n", program)
+    if entry_point:
+        shared_list = f"{entry_module}.tests"
+        opened = f"open {prefix}" if prefix else None
+        if opened and re.search(r"(?m)^open Expecto[ \t]*$", program):
+            if not re.search(rf"(?m)^{re.escape(opened)}[ \t]*$", program):
+                program = re.sub(r"(?m)^open Expecto[ \t]*$", f"open Expecto\n{opened}", program, count=1)
+                entry_point = re.search(r"(?m)^[ \t]*\[<EntryPoint>\][ \t]*\n", program)
+            shared_list = f"{entry_module[len(prefix) + 1:]}.tests"
+            review.append(f"tests/DotNet/DotNet.Tests.fs: opened {prefix} and shortened the Shared list to `{shared_list}`")
+        elif prefix:
+            edits.append(f"tests/DotNet/DotNet.Tests.fs: no `open Expecto` to place `{opened}` after; open it and shorten `{entry_module}.tests` by hand")
+        hook = f"[<Tests>]\nlet sharedTests = {shared_list}\n\n"
+        rewritten = program[: entry_point.start()] + hook + program[entry_point.start():]
+    else:
+        rewritten = program
+        edits.append(f"tests/DotNet/DotNet.Tests.fs: mark the Shared list for Expecto's assembly scan ([<Tests>] let sharedTests = {entry_module}.tests)")
+    if module_name(rewritten) is None:
+        added = f"{prefix}.DotNet.Tests" if prefix else "DotNet.Tests"
+        rewritten = f"module {added}\n\n" + rewritten
+        review.append(f"tests/DotNet/DotNet.Tests.fs: the runner had no module declaration; added `module {added}`")
+    (dotnet / "DotNet.Tests.fs").write_text(rewritten)
+    for path in candidates:
+        if path not in shared:
+            move(path, dotnet / path.relative_to(tests))
+
+    target = Path("tests/Shared")
+    for path, source in texts.items():
+        source = re.sub(r"(?m)^([ \t]*)open Expecto[ \t]*$", r"\1open Alma.Testing", source)
+        source = re.sub(r"(?m)^[ \t]*\[<Tests>\][ \t]*\n", "", source)
+        source = re.sub(r"\[<Tests>\][ \t]*", "", source)
+        move(path, target / path.relative_to(tests))
+        (target / path.relative_to(tests)).write_text(source)
+    (target / "Shared.Tests.fs").write_text(
+        f"module {entry_module}\n\nopen Alma.Testing\n" + (f"open {prefix}\n" if prefix else "") + "\nlet tests =\n    testList \"Shared\" [\n"
+        + "".join(f"        {name}\n" for name in imported) + "    ]\n\nregister tests\n")
+    compile_items = "\n".join(f'    <Compile Include="{name}" />' for name in [str(path.relative_to(tests)) for path in shared] + ["Shared.Tests.fs"])
+    (target / "Shared.Tests.fsproj").write_text(shared_project(references).replace("__COMPILE__", compile_items))
+    if re.search(r"(?m)^group Tests\b", Path("paket.dependencies").read_text()):
+        edits.append("tests/Shared/paket.references: not written; paket.dependencies has `group Tests`, so create it with `group Tests` and `Alma.Testing` under it")
+    else:
+        (target / "paket.references").write_text("Alma.Testing\n")
+
+    for leftover in ("bin", "obj"):
+        shutil.rmtree(tests / leftover, ignore_errors=True)
+    (tests / "AssemblyInfo.fs").unlink(missing_ok=True)
+
+    done.append(f"tests/DotNet: {old_project.name} with {len(candidates) - len(shared)} file(s) that stay on .NET, runner {runner} → DotNet.Tests.fs")
+    done.append(f"tests/Shared: {', '.join(path.name for path in shared)}, gathered by Shared.Tests.fs")
+    if prefix:
+        review.append(f"tests/Shared/Shared.Tests.fs: took {prefix} as the shared test prefix, opened it and shortened "
+                      f"{sum(1 for a, b in zip(lists, imported) if a != b)} of {len(lists)} list names; check the prefix and that no short name resolves to another module")
+        review += [f"tests/Shared/Shared.Tests.fs: {a} stays qualified, its first segment clashes with an Alma.Testing name" for a, b in zip(lists, imported) if a == b and a.startswith(f"{prefix}.")]
+    edits += [f"tests/DotNet/{path.name}: {reason}" for path, reason in reasons.items() if reason != HELPER]
+    if references:
+        edits.append(f"tests/Shared/Shared.Tests.fsproj: Fable compiles {', '.join(references)}; drop any it does not need")
+
+
+def preflight(arguments):
+    """Everything the script will demand, gathered before it changes anything so the asks arrive at once."""
+    asks = [ask for ask in (alma_testing_ask(arguments), npm_ask(), vite_ask("run bin/upgrade-vite first"), fscheck_ask()) if ask]
+    if any("Fable.Mocha" in path.read_text() for path in Path("tests").rglob("*") if path.is_file() and path.suffix in (".fs", ".references")):
+        asks.append("tests/ still uses Fable.Mocha; move those tests to Alma.Testing by hand first")
+    old = sorted(Path("tests").glob("*.fsproj"))
+    if len(old) > 1:
+        asks.append(f"several test projects ({', '.join(map(str, old))}); the script handles one")
+    stop_with_asks(asks)
+
+
+def pin_packages(arguments, done, edits):
+    path = Path("paket.dependencies")
+    text = path.read_text()
+    main, _, groups = text.partition("\ngroup ")
+    groups = "\ngroup " + groups if groups else ""
+    original = text
+    main = re.sub(r"(?m)^[ \t]*nuget Fable\.Mocha\b.*\n", "", main)
+    groups = re.sub(r"(?m)^[ \t]*nuget Fable\.Mocha\b.*\n", "", groups)
+    build_group = re.search(r"(?ms)^group Build\b.*?(?=^group |\Z)", groups)
+    if not build_group or not re.search(r"(?m)^[ \t]*nuget Alma\.Build\b", build_group.group(0)):
+        raise SystemExit("paket.dependencies has no `nuget Alma.Build` in `group Build`; move the build onto Alma.Build first (bin/migrate-to-alma-build).")
+    block = re.sub(r"(?m)^([ \t]*)nuget Alma\.Build\b.*$", rf"\1nuget Alma.Build {arguments.alma_build}", build_group.group(0))
+    text = main + groups.replace(build_group.group(0), block)
+    if text != original:
+        path.write_text(text)
+        done.append(f"paket.dependencies: Alma.Build {arguments.alma_build}, no Fable.Mocha")
+    expecto = re.search(r"(?m)^[ \t]*nuget Expecto[ \t]+(\S.*)$", main)
+    major = re.search(r"\d+", expecto.group(1)) if expecto else None
+    if major and int(major.group(0)) != 11:
+        edits.append(f"paket.dependencies: `nuget Expecto {expecto.group(1).strip()}` is outside Alma.Testing's [11.0.0, 12)")
+
+
+def select_tests(done, edits):
+    path = Path("build/Build.fs")
+    text = path.read_text()
+    line = "Spec.library LibraryTests.dotNetAndFable"
+    if "Spec.library" in text:
+        return
+    if re.search(r"\bLibraryTests\.|^\s*(?:\{.*\bwith\s+)?Tests\s*=", text, re.MULTILINE):
+        edits.append(f"build/Build.fs: already sets the tests; create the Library spec with `{line}` and move them into its argument")
+        return
+    if not re.search(r"\bSpec\.defaultLibrary\b", text):
+        edits.append(f"build/Build.fs: create the Library spec with `{line}`")
+        return
+    path.write_text(re.sub(r"\bSpec\.defaultLibrary\b", line, text))
+    done.append(f"build/Build.fs: {line}")
+    if re.search(r"(?m)^\s*TestsSources\s*=", text):
+        edits.append("build/Build.fs: remove `TestsSources`; the tests are the argument of `Spec.library` now")
+
+
+def add_npm(done):
+    path = Path("package.json")
+    if not path.exists():
+        path.write_text(json.dumps({"private": True, "type": "module"}, indent=4) + "\n")
+    ignore = Path(".gitignore")
+    lines = ignore.read_text().splitlines() if ignore.exists() else []
+    missing = [entry for entry in ("node_modules/", "output/") if entry not in lines]
+    if missing:
+        ignore.write_text("\n".join(lines + missing) + "\n")
+    done.append(f"package.json: vitest {migration.VITEST} (its latest release); .gitignore: node_modules/, output/")
+
+
+def run_checks(before, output):
+    """The guide's \"Done when\" checks that a command can answer, one line each."""
+    granted = " ".join(path.read_text() for path in Path("src").glob("*/AssemblyInfo.fs"))
+    missing = [name for name in ("Shared.Tests", "DotNet.Tests") if name not in granted]
+    shared_files = [path for path in Path("tests/Shared").rglob("*") if path.is_file() and "obj" not in path.parts and "bin" not in path.parts and "output" not in path.parts]
+    registers = sum(len(re.findall(r"(?m)^register\b", path.read_text())) for path in shared_files if path.suffix == ".fs")
+    fscheck = [str(path) for path in shared_files if "FsCheck" in path.read_text()]
+    after = test_count("tests/DotNet")
+    shared = test_count_of("tests/DotNet", "Shared")
+    vitest = [int(count) for count in re.findall(r"Tests\s+(?:\d+ failed \| )?(?:\d+ skipped \| )?(\d+) passed", output)]
+    warnings = len(re.findall(r"warning FABLE", output))
+    return [
+        (not missing, "src/*/AssemblyInfo.fs grants Shared.Tests and DotNet.Tests" if not missing
+            else f"src/*/AssemblyInfo.fs does not grant {', '.join(missing)}: Alma.Build is too old"),
+        (registers == 1, f"tests/Shared has {registers} `register` line(s), expected 1"),
+        (not fscheck, "tests/Shared references no FsCheck" if not fscheck else f"tests/Shared references FsCheck in {', '.join(fscheck)}"),
+        (before is None or before == after, f"Expecto runs {after} tests" + ("" if before is None else f", the baseline was {before}")),
+        (bool(shared) and shared in vitest,
+         f"Expecto runs {shared} shared tests, Vitest reported {', '.join(map(str, vitest)) or 'no totals'}; one of them must be {shared}"),
+        (warnings == 0, f"{warnings} `warning FABLE` line(s) in the Tests output"),
+    ]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--alma-build", default="~> 4.0", help="Alma.Build constraint (default: ~> 4.0)")
+    parser.add_argument("--alma-testing", default="~> 1.0", help="Alma.Testing constraint (default: ~> 1.0)")
+    parser.add_argument("--setup-node", default="actions/setup-node@v4", help="the action the CI step uses")
+    parser.add_argument("--work-dir", required=True, help="directory for the log, report and baseline; create it outside the worktree (mktemp -d) and pass the same one to every call")
+    parser.add_argument("--rerun", action="store_true", help="continue after a failed run, or after adding what the script asked for, on the tree as it is")
+    arguments = parser.parse_args()
+    migration.use_work_dir(arguments.work_dir)
+
+    if not Path("build/Build.fs").exists() or not Path("paket.dependencies").exists():
+        raise SystemExit("Run from the project root of an Alma.Build repository.")
+    require_clean_tree(arguments.rerun)
+    preflight(arguments)
+    old = sorted(Path("tests").glob("*.fsproj"))
+
+    before = None
+    if arguments.rerun and migration.REPORT.exists():
+        migration.REPORT.replace(migration.PREVIOUS)
+    elif not arguments.rerun:
+        migration.PREVIOUS.unlink(missing_ok=True)
+    if old:
+        must(["dotnet", "tool", "restore"])
+        must(["dotnet", "paket", "restore"])
+        must(build("AssemblyInfo"))
+        before = test_count(old[0])
+        if before is None:
+            raise SystemExit(f"\n{old[0]} printed no `EXPECTO! <N> tests run` line; fix its test run first, then rerun this script with --rerun.")
+        migration.BASELINE.write_text(f"{before}\n")
+        print(f"{before} tests before the move")
+    elif migration.BASELINE.exists():
+        before = int(migration.BASELINE.read_text())
+
+    done, edits, review = [], [], []
+    pin_packages(arguments, done, edits)
+    add_npm(done)
+    select_tests(done, edits)
+    if old:
+        restructure(old[0], done, edits, review)
+    add_readme_node(done, edits)
+    add_node_to_ci(arguments.setup_node, done, edits)
+    write_report(done, edits, review, None)
+
+    for command in (["dotnet", "tool", "restore"], ["dotnet", "paket", "install"],
+                    ["npm", "install", "--save-dev", f"vitest@{migration.VITEST}"],
+                    build("Bootstrap"), build("Solution"), build("AssemblyInfo")):
+        must(command)
+    granted = " ".join(path.read_text() for path in Path("src").glob("*/AssemblyInfo.fs"))
+    if "Shared.Tests" not in granted:
+        raise SystemExit("\nsrc/*/AssemblyInfo.fs does not grant Shared.Tests internal access: Alma.Build is too old.")
+    start = migration.LOG.stat().st_size
+    must(build("Tests"))
+
+    checks = run_checks(before, log_text(start))
+    write_report(done, edits, review, checks)
+    print("\n" + migration.REPORT.read_text() + f"\nFull output: {migration.LOG}")
+    if not all(ok for ok, _ in checks):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -63,7 +63,7 @@ whether each runtime's output is bundled.
 
 ## Tests
 
-The `Tests` target runs both suites. To run one directly:
+The `Tests` target runs both suites side by side, their output interleaved. To run one directly:
 
 ```bash
 dotnet run --project tests/unit/unit.fsproj --

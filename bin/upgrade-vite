@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Upgrades a project's npm toolchain to the versions Alma.Testing supports: Vitest 5, and for a SAFE-stack
+client Vite 8 with @vitejs/plugin-react 6.
+
+For a project whose package.json lists `vite` (a SAFE-stack client), it:
+
+- installs the latest Vite 8, and @vitejs/plugin-react 6 when listed;
+- raises every other package declaring a Vite peer range that excludes Vite 8 to its latest release, when that
+  release admits it, and lists the ones none does;
+- renames the client's Vite options Vite 8 replaced and drops the ones its defaults cover (`minify: "esbuild"`
+  goes, Vite 8 minifies with Oxc; `build.target` goes, so the JS and the CSS target the browsers Baseline lists
+  as widely available; `rollupOptions` becomes `rolldownOptions`; an `optimizeDeps.esbuildOptions` holding only
+  a target goes) and lists the ones a pattern cannot rewrite.
+
+It installs the latest Vitest 5 when package.json lists `vitest`. Before the upgrade it runs `Bundle` to record
+the client bundle's JS and CSS size; after it, `Bundle` and `Tests` again, and checks the installed majors, Vite's
+deprecation warnings, the bundle sizes against that baseline, and the Vitest total. Tests are skipped while
+tests/ still uses Fable.Mocha: run bin/migrate-safe-stack-tests next, or that script with --upgrade-vite
+instead of this one.
+
+Everything the commands print goes to migration.log in the directory given as --work-dir (create it outside the
+worktree, for example with `mktemp -d`, and pass the same one to every call); the baseline sizes a rerun needs
+are kept there too. The script prints only migration-report.md.
+
+Run from the project root of a clean working tree; after a failed run, or after you did what the script
+asked, rerun it with `--rerun`. Review with `git diff`; a run that started clean can be undone with
+`git checkout -- . && git clean -fd`.
+"""
+
+import argparse
+import json
+import re
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import migration  # noqa: E402
+from migration import (  # noqa: E402
+    VITEST, build, direct_dependencies, locked_version, log_text, must, npm_ask, require_clean_tree,
+    stop_with_asks, vite_upgrade, write_report,
+)
+
+GROWTH = 1.1
+"""How much larger the upgraded bundle may be than the baseline before the size check fails."""
+
+
+def uses_fable_mocha():
+    return any("Fable.Mocha" in (line.strip() for line in path.read_text().splitlines())
+               for path in Path("tests").rglob("paket.references"))
+
+
+def size_check(kind, before, after):
+    grown = after > before * GROWTH
+    hint = "; a build.target or build.cssTarget left in the config lowers it for older browsers" if kind == "css" and grown else ""
+    return (not grown, f"the client's {kind.upper()} is {after // 1024} kB, {before // 1024} kB before{hint}")
+
+
+def run_checks(specs, output, before, after, tested):
+    checks = []
+    for spec in specs:
+        name, _, major = spec.rpartition("@")
+        locked = locked_version(name)
+        if major.isdigit():
+            checks.append((locked is not None and locked.split(".")[0] == major, f"package-lock.json has {name} {locked}, expected {major}.x"))
+    deprecated = sorted({line.strip() for line in output.splitlines()
+                         if re.search(r"(?i)\bdeprecated\b", line) and not re.match(r"(?i)\s*npm warn deprecated", line)})
+    checks.append((not deprecated, f"{len(deprecated)} deprecation warning(s) in the output" + "".join(f"\n  - {line}" for line in deprecated)))
+    if before and after:
+        checks += [size_check(kind, before[kind], after[kind]) for kind in ("js", "css") if before.get(kind)]
+    if tested:
+        vitest = [int(count) for count in re.findall(r"Tests\s+(?:\d+ failed \| )?(?:\d+ skipped \| )?(\d+) passed", output)]
+        failed = bool(re.search(r"Tests\s+\d+ failed", output))
+        checks.append((bool(vitest) and not failed, f"Vitest reported {', '.join(map(str, vitest)) or 'no totals'} passed tests" + (" and some failed" if failed else "")))
+    return checks
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--work-dir", required=True, help="directory for the log, report and baseline; create it outside the worktree (mktemp -d) and pass the same one to every call")
+    parser.add_argument("--rerun", action="store_true", help="continue after a failed run, or after doing what the script asked, on the tree as it is")
+    arguments = parser.parse_args()
+    migration.use_work_dir(arguments.work_dir)
+
+    if not Path("build/Build.fs").exists() or not Path("package.json").exists():
+        raise SystemExit("Run from the project root of an Alma.Build repository with a package.json.")
+    require_clean_tree(arguments.rerun)
+    stop_with_asks([ask for ask in [npm_ask()] if ask])
+
+    if arguments.rerun and migration.REPORT.exists():
+        migration.REPORT.replace(migration.PREVIOUS)
+    elif not arguments.rerun:
+        migration.PREVIOUS.unlink(missing_ok=True)
+
+    client = "vite" in direct_dependencies()
+    if client and not migration.BASELINE.exists():
+        must(["dotnet", "tool", "restore"])
+        must(["npm", "install"])
+        must(build("Bundle"))
+        migration.BASELINE.write_text(json.dumps(migration.bundle_sizes()) + "\n")
+    before = json.loads(migration.BASELINE.read_text()) if migration.BASELINE.exists() else None
+
+    done, edits, review = [], [], []
+    specs = vite_upgrade(done, edits, review) + ([f"vitest@{VITEST}"] if "vitest" in direct_dependencies() else [])
+    if not specs:
+        raise SystemExit("package.json lists neither vite nor vitest; there is nothing to upgrade.")
+    if f"vitest@{VITEST}" in specs:
+        done.append(f"package.json: vitest@{VITEST}, its latest release")
+    tested = not uses_fable_mocha()
+    if not tested:
+        edits.append("Tests not run: tests/ still uses Fable.Mocha; run bin/migrate-safe-stack-tests next")
+    write_report(done, edits, review, None)
+
+    start = migration.LOG.stat().st_size if migration.LOG.exists() else 0
+    must(["npm", "install", "--save-dev", *specs])
+    after = None
+    if client:
+        must(build("Bundle"))
+        after = migration.bundle_sizes()
+    if tested:
+        must(build("Tests"))
+
+    checks = run_checks(specs, log_text(start), before, after, tested)
+    write_report(done, edits, review, checks)
+    print("\n" + migration.REPORT.read_text() + f"\nFull output: {migration.LOG}")
+    if not all(ok for ok, _ in checks):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

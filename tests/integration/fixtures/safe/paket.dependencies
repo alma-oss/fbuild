@@ -2,12 +2,13 @@ framework: net10.0
 storage: none
 
 source https://api.nuget.org/v3/index.json
+source ~/.nuget/local
 
 nuget FSharp.Core ~> 10.1
 
-nuget Fable.Core ~> 4.5
+nuget Fable.Core ~> 5.4
 nuget Fable.Remoting.Client ~> 8.0
 nuget Fable.Remoting.AspNetCore ~> 3.1
 
-nuget Expecto ~> 10.2
-nuget Fable.Mocha ~> 2.17
+nuget Expecto ~> 11.0
+nuget Alma.Testing 1.0.0-preview.4
