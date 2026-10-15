@@ -137,10 +137,18 @@ meant. A configured runtime reaches the projects the same way in
 either case (§5.3).
 
 `Lint` runs one `fsharplint` job per project concurrently and prints each job's
-output as a single block once every job has finished (`GroupedByJob`, §5.5).
+output as a single block in project order, each as soon as it and every project
+before it have finished (`GroupedByJob JobOrder`, §5.5).
+`Tests` outside SAFE runs every project in `Sources.Tests` with `--no-build`
+against what `Build` compiled; a single project runs with live output, several
+run concurrently, each printing its block as soon as it exits
+(`GroupedByJob CompletionOrder`), so a fast project's failure shows while slower
+ones still run. Every project runs to completion and the target fails afterwards,
+naming each failed project.
 The SAFE targets pair a server job with a client job and run them with live
 interleaved output (`Bundle`, `Run`, `RunMirrord`, `Tests`, `WatchTests`).
-SAFE `Tests` runs the Expecto server tests in `tests/Server` and compiles
+SAFE `Tests` runs the Expecto server tests in `tests/Server` with `--no-build`
+against what `Build` compiled, and compiles
 `tests/Client` with Fable into `tests/Client/output`, then runs the top-level
 modules there with `npx mocha`; Fable.Mocha registers its tests with mocha
 outside a browser, so a failing client test fails the target. `WatchTests`
@@ -377,8 +385,9 @@ type Command =
 serially and raises on a non-zero exit code, `toJob` + `runParallelWith`
 executes several concurrently. A parallel run sequences output either `Live`
 (interleaved as the processes write, the only option when a job never exits) or
-`GroupedByJob` (captured, then printed one block per job in job order — every
-job must terminate).
+`GroupedByJob` (captured, then printed one block per job — every job must
+terminate), its blocks in `JobOrder` (each once it and every job before it
+have exited) or in `CompletionOrder` (each as its job exits).
 
 **RTK integration.** `RTK_ACTIVE` in the environment switches the whole layer
 on. Each command then picks a transport (`rtk err`, `rtk test`, or a direct
@@ -554,7 +563,7 @@ give every fixture copy isolated engine `bin`/`obj` paths, so cases can run conc
 | `library` | `Release` | a `.nupkg` in `release/` |
 | `library-root` | `Release` | a `.nupkg` in `release/` when the project shares the root with a solution |
 | `executable` | `Release` | `app/test.executable.dll` |
-| `console` | `Release` | Linux x64 and macOS x64/arm64 archives, each holding the single-file executable |
+| `console` | `Release` | Linux x64 and macOS arm64 archives, each holding the single-file executable |
 | `console` | `Build` | every project of the solution built under its runtime, nothing in the runtime-agnostic output |
 | `console`, solution deleted | `Build` | the same, with `Build` fanning out per project directory |
 | `console` | `Bootstrap` | `Directory.Build.props` deployed |
@@ -566,8 +575,11 @@ give every fixture copy isolated engine `bin`/`obj` paths, so cases can run conc
 | `safe` | `Bundle` | a server `.dll` in `deploy/`, an `.html` in `deploy/public/` |
 | `safe` | `Bundle` | the published server, started on a free port, echoes a record of a single-case DU, a union with fields, options, `int64`, `decimal`, list, `Map`, tuple and `Result` back to the Fable-compiled `Fable.Remoting.Client` proxy run under Node; the server and the client each compare it to the shared sample |
 
+| `safe`, failing client test | `Tests no-lint` | non-zero exit, the test's message reported |
+
 Landing on the terminal target pulls the whole chain (`AssemblyInfo`, `Build`,
-`Lint`, `Tests`) with it. Fixtures reference the engine **from source**, so the
+`Lint`, `Tests`) with it. Cases that only read the outcome of the same fixture
+and target share one run (`sharedFixture`). Fixtures reference the engine **from source**, so the
 integration tests exercise whatever is checked out with no repack step in between. Set
 `FBUILD_KEEP_TEMP` to keep a scenario's directory for inspection.
 

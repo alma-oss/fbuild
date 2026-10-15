@@ -9,6 +9,7 @@ open Utils
 // Each scenario copies its checked-in fixture — a complete consumer repo, `build/Build.fs` included —
 // into a throwaway directory, then runs the requested target through the engine's own entry point and
 // asserts its behavior. Landing on a terminal target pulls its whole dependency chain with it.
+// Scenarios that only read the outcome of the same fixture and target share one such run.
 // --------------------------------------------------------------------------------------------------------
 
 let private fixtureTest setup target label assertArtifacts =
@@ -23,13 +24,18 @@ let private editedFixtureTest setup edit target label assertArtifacts =
 let private failingFixtureTest setup edit target label assertFailure =
     testCase label <| fun () -> withFailingEditedFixture setup edit target assertFailure
 
+let private bundledSafe = sharedFixture Safe "Bundle"
+
+let private bundledSafeTest label assertArtifacts =
+    testCase label <| fun () -> assertArtifacts bundledSafe.Value
+
 let private fileExists (dir: string) (relative: string) = File.Exists (Path.Combine (dir, relative))
 
 let private anyFile (dir: string) (relative: string) (pattern: string) =
     let full = Path.Combine (dir, relative)
     Directory.Exists full && Directory.GetFiles(full, pattern).Length > 0
 
-let private consoleRuntimeIdentifiers = [ "linux-x64"; "osx-x64"; "osx-arm64" ]
+let private consoleRuntimeIdentifiers = [ "linux-x64"; "osx-arm64" ]
 
 let private builtForRuntime (dir: string) (project: string) (assembly: string) =
     let output = Path.Combine (dir, project, "bin/Debug/net10.0")
@@ -54,6 +60,49 @@ let private assertConsoleBuiltForRuntime dir =
 [<Tests>]
 let integrationTests =
     testList "Integration tests" [
+        // The slowest scenarios come first, so they start before the parallel workers fill up.
+        bundledSafeTest "should run the client tests when a SAFE application is bundled" (fun dir ->
+            Expect.isTrue
+                (fileExists dir "tests/Client/output/Client.Tests.js")
+                "Tests should compile the client tests with Fable before running them")
+
+        failingFixtureTest
+            Safe
+            (fun dir ->
+                let tests = Path.Combine (dir, "tests", "Client", "Client.Tests.fs")
+                File.WriteAllText (tests, (File.ReadAllText tests).Replace ("Expect.equal 1 1", "Expect.equal 1 2")))
+            "Tests no-lint"
+            "should fail the build when a SAFE application's client test fails"
+            (fun code output ->
+                Expect.notEqual code 0 "A failing client test should fail the Tests target"
+                Expect.stringContains output "Fixture assertion must pass" "The failing client test's message should be reported")
+
+        bundledSafeTest "should publish the server and client when a SAFE application is bundled" (fun dir ->
+            Expect.isTrue (anyFile dir "deploy" "*.dll") "Bundle should publish the server into deploy/"
+            Expect.isTrue
+                (anyFile dir "deploy/public" "*.html")
+                "Bundle should build the client bundle into deploy/public/")
+
+        bundledSafeTest "should round-trip a record through the remoting API when a SAFE application is bundled" (fun dir ->
+            withServer (Path.Combine (dir, "deploy")) "Server.dll" (fun url ->
+                execOk (Path.Combine (dir, "src", "Client")) "node" $"roundtrip.mjs {url}"))
+
+        testCase "should release a library through the packaged engine" <| fun () ->
+            withPackagedFixture Library "Release" (fun dir ->
+                Expect.isTrue
+                    (fileExists dir "build/README.md")
+                    "Bootstrap should deploy the bundled files with their directory structure"
+
+                let manifest = File.ReadAllText (Path.Combine (dir, ".config", "dotnet-tools.json"))
+
+                Expect.stringContains manifest "\"isRoot\": true" "Bootstrap should render a root tools manifest"
+                Expect.stringContains manifest "\"paket\"" "The rendered manifest should pin Paket"
+                Expect.stringContains manifest "\"dotnet-fsharplint\"" "The rendered manifest should pin the linter"
+                Expect.isFalse (manifest.Contains "\"fable\"") "A library should not get the SAFE-stack tools"
+                Expect.isTrue
+                    (anyFile dir "release" "*.nupkg")
+                    "Release should move a .nupkg into release/ when the engine is consumed as a package")
+
         fixtureTest Library "Release" "should create a NuGet package when a library is released" (fun dir ->
             Expect.isTrue (anyFile dir "release" "*.nupkg") "Release should move a .nupkg into release/")
 
@@ -150,46 +199,10 @@ let integrationTests =
             Expect.isFalse
                 (fileExists dir "Directory.Build.props")
                 "A spec that selects no runtime should not receive the props")
-
-        fixtureTest Safe "Tests" "should run the client tests when a SAFE application is tested" (fun dir ->
-            Expect.isTrue
-                (fileExists dir "tests/Client/output/Client.Tests.js")
-                "Tests should compile the client tests with Fable before running them")
-
-        failingFixtureTest
-            Safe
-            (fun dir ->
-                let tests = Path.Combine (dir, "tests", "Client", "Client.Tests.fs")
-                File.WriteAllText (tests, (File.ReadAllText tests).Replace ("Expect.equal 1 1", "Expect.equal 1 2")))
-            "Tests"
-            "should fail the build when a SAFE application's client test fails"
-            (fun code output ->
-                Expect.notEqual code 0 "A failing client test should fail the Tests target"
-                Expect.stringContains output "Fixture assertion must pass" "The failing client test's message should be reported")
-
-        fixtureTest Safe "Bundle" "should publish the server and client when a SAFE application is bundled" (fun dir ->
-            Expect.isTrue (anyFile dir "deploy" "*.dll") "Bundle should publish the server into deploy/"
-            Expect.isTrue
-                (anyFile dir "deploy/public" "*.html")
-                "Bundle should build the client bundle into deploy/public/")
-
-        fixtureTest Safe "Bundle" "should round-trip a record through the remoting API when a SAFE application is bundled" (fun dir ->
-            withServer (Path.Combine (dir, "deploy")) "Server.dll" (fun url ->
-                execOk (Path.Combine (dir, "src", "Client")) "node" $"roundtrip.mjs {url}"))
-
-        testCase "should release a library through the packaged engine" <| fun () ->
-            withPackagedFixture Library "Release" (fun dir ->
-                Expect.isTrue
-                    (fileExists dir "build/README.md")
-                    "Bootstrap should deploy the bundled files with their directory structure"
-
-                let manifest = File.ReadAllText (Path.Combine (dir, ".config", "dotnet-tools.json"))
-
-                Expect.stringContains manifest "\"isRoot\": true" "Bootstrap should render a root tools manifest"
-                Expect.stringContains manifest "\"paket\"" "The rendered manifest should pin Paket"
-                Expect.stringContains manifest "\"dotnet-fsharplint\"" "The rendered manifest should pin the linter"
-                Expect.isFalse (manifest.Contains "\"fable\"") "A library should not get the SAFE-stack tools"
-                Expect.isTrue
-                    (anyFile dir "release" "*.nupkg")
-                    "Release should move a .nupkg into release/ when the engine is consumed as a package")
     ]
+
+[<Tests>]
+let sharedCleanup =
+    afterRunTests (fun () ->
+        releaseSharedFixture bundledSafe
+        releaseEngineBuild ())

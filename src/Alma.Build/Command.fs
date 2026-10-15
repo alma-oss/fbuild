@@ -6,6 +6,7 @@ namespace Alma.Build
 module internal Command =
     open System
     open System.IO
+    open System.Linq
 
     open Fake.Core
     open Fake.IO
@@ -199,13 +200,20 @@ module internal Command =
         Output: OutputMode
     }
 
+    /// When the blocks of a grouped parallel run print.
+    type BlockOrder =
+        /// In job order, each as soon as its job and every job before it have exited.
+        | JobOrder
+        /// Each as soon as its job exits.
+        | CompletionOrder
+
     /// How a parallel run sequences its jobs' output, chosen by the caller.
     type OutputSequencing =
         /// Jobs write to the console as they go, interleaved.
         | Live
-        /// Captured from every job — a `Streamed` one included — then printed as one block per job,
-        /// in job order, once every job has exited. Requires every job to terminate.
-        | GroupedByJob
+        /// Captured from every job — a `Streamed` one included — then printed as one block per job.
+        /// Requires every job to terminate.
+        | GroupedByJob of BlockOrder
 
     // ---- Runners ----
 
@@ -282,7 +290,8 @@ module internal Command =
     /// before failing the build, so the process carries no `ensureExitCode`.
     let toJob (name: JobName) (command: Command) (args: string list) (dir: string): ParallelJob = {
         Name = name
-        Process = wrapped command args dir
+        // FAKE's own command echo bypasses the runner's console lock, so the runner prints the start line itself.
+        Process = wrapped command args dir |> CreateProcess.disableTraceCommand
         Output =
             match plan command |> snd with
             | Some filter -> Buffered (report command filter)
@@ -440,20 +449,26 @@ module internal Command =
                 with _ ->
                     ()
 
-        /// Every job runs to completion with its output captured, then the blocks print in job
-        /// order. Requires every job to terminate — a job that never exits stalls the whole run.
-        let private runGrouped (indexed: (int * ParallelJob)[]) =
-            indexed
-            |> Array.Parallel.map (fun (index, job) ->
-                let (lines, error), code = runCaptured job
-                index, job, lines, error, code
-            )
-            |> Array.map (fun (index, job, lines, error, code) ->
-                printStartingJob index job
-                printLines index lines
-                eprintf "%s" error
+        let private printGroup index job lines (error: string) =
+            printStartingJob index job
+            printLines index lines
+            eprintf "%s" error
+
+        /// Every job runs to completion with its output captured, each printed as one block in
+        /// `order`. Requires every job to terminate — a job that never exits stalls the whole run.
+        let private runGrouped order (indexed: (int * ParallelJob)[]) =
+            let jobs = indexed.AsParallel ()
+
+            match order with
+            | JobOrder -> jobs.AsOrdered () :> ParallelQuery<_>
+            | CompletionOrder -> jobs
+            |> _.WithMergeOptions(ParallelMergeOptions.NotBuffered)
+            |> _.Select(fun (index, job) -> index, job, runCaptured job)
+            |> Seq.map (fun (index, job, ((lines, error), code)) ->
+                printGroup index job lines error
                 job.Name, code
             )
+            |> Seq.toArray
 
         let run sequencing jobs =
             try
@@ -472,7 +487,7 @@ module internal Command =
 
                         job.Name, code
                     )
-                | GroupedByJob -> runGrouped indexed
+                | GroupedByJob order -> runGrouped order indexed
             finally
                 restoreTerminalState ()
 

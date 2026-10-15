@@ -2,6 +2,9 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- `Tests` runs several test projects concurrently, printing each project's output as one block as soon as that project finishes. Every project runs to the end and the build fails afterwards, naming each failed project. A single test project still reports live.
+- SAFE-stack `Tests` runs the server tests against the output of `Build` instead of building again.
+- Fix command lines of concurrently run jobs printing interleaved on one line.
 
 ## 3.1.0 - 2026-10-14
 - Fix `RaspberryPiHassioAddon` to use real framework target `linux-musl-arm64`
