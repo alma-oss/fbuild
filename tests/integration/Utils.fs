@@ -3,6 +3,7 @@ module Alma.Build.Tests.Integration.Utils
 open System
 open System.IO
 open System.Diagnostics
+open System.Text.RegularExpressions
 
 // ---- Repo layout ----
 
@@ -43,14 +44,43 @@ module Fixture =
 
 // ---- Process execution ----
 
+/// Variables that change what the tools print when the suite itself runs under RTK or an AI agent: RTK
+/// compacts the output, and Vitest swaps its default reporter for `minimal`, which names no passing file,
+/// under every agent std-env 4.3 detects. The assertions read the tools' own output.
+let private outputAlteringVariables = [
+    "RTK_ACTIVE"
+    "AI_AGENT"
+    "CLAUDECODE"
+    "CLAUDE_CODE"
+    "REPL_ID"
+    "GEMINI_CLI"
+    "CODEX_SANDBOX"
+    "CODEX_THREAD_ID"
+    "OPENCODE"
+    "AUGMENT_AGENT"
+    "GOOSE_PROVIDER"
+    "JUNIE_DATA"
+    "JUNIE_SHIM_PATH"
+    "COPILOT_AGENT"
+    "COPILOT_CLI"
+    "CURSOR_AGENT"
+    "EDITOR"
+    "TERM_PROGRAM"
+]
+
+/// Colour codes, stripped from what the assertions read: they split the text an assertion looks for, and
+/// whether a tool colours its output depends on the environment.
+let private ansiEscapes = Regex "\u001b\\[[0-9;?]*[A-Za-z]"
+
 let execWith (env: (string * string) list) (workDir: string) (exe: string) (args: string) =
     let psi = ProcessStartInfo (exe, args)
     psi.WorkingDirectory <- workDir
     psi.RedirectStandardOutput <- true
     psi.RedirectStandardError <- true
     psi.UseShellExecute <- false
-    // The assertions read the tools' own output, which RTK would compact when the suite itself runs under it.
-    psi.Environment.Remove "RTK_ACTIVE" |> ignore
+
+    for name in outputAlteringVariables do
+        psi.Environment.Remove name |> ignore
 
     for name, value in env do
         psi.Environment[name] <- value
@@ -59,7 +89,7 @@ let execWith (env: (string * string) list) (workDir: string) (exe: string) (args
     let stdout = p.StandardOutput.ReadToEnd ()
     let stderr = p.StandardError.ReadToEnd ()
     p.WaitForExit ()
-    p.ExitCode, stdout, stderr
+    p.ExitCode, ansiEscapes.Replace (stdout, ""), ansiEscapes.Replace (stderr, "")
 
 let exec (workDir: string) (exe: string) (args: string) = execWith [] workDir exe args
 
@@ -127,25 +157,37 @@ let rec private copyAll pending =
 
 let private copyInto (source: string) (target: string) = copyAll [ source, target ]
 
-/// Intermediate and output paths for the engine built through a fixture's project reference,
-/// isolated to that fixture copy: the scenarios run in parallel over one engine project.
-let private engineBuildPaths fixtureDirectory =
+/// The restores below populate the machine-wide NuGet package cache, which the scenarios would
+/// otherwise write concurrently.
+let private restoreLock = obj ()
+
+let private engineBuildDirectory = Path.Combine (Path.GetTempPath (), $"fbuild-it-engine-{Guid.NewGuid():N}")
+
+/// Intermediate and output paths of the one engine build every source-engine fixture references.
+let private engineIntermediate, private engineOutput =
     let separator = string Path.DirectorySeparatorChar
-    Path.Combine (fixtureDirectory, "build", ".engine", "obj") + separator,
-    Path.Combine (fixtureDirectory, "build", ".engine", "bin") + separator
+    Path.Combine (engineBuildDirectory, "obj") + separator, Path.Combine (engineBuildDirectory, "bin") + separator
+
+let private engineBuild =
+    lazy (
+        let paths = $"/p:BaseIntermediateOutputPath=\"{engineIntermediate}\" /p:BaseOutputPath=\"{engineOutput}\""
+        lock restoreLock (fun () -> execOk root "dotnet" $"restore \"{engineProject}\" {paths}")
+        execOk root "dotnet" $"build \"{engineProject}\" --no-restore {paths}"
+    )
 
 /// A build project referencing the engine from source. It restores without Paket, so the SDK's
 /// implicit FSharp.Core is disabled here by hand to let the engine's own version flow through the
-/// project reference.
-let private buildFsproj fixtureDirectory =
-    let engineIntermediate, engineOutput = engineBuildPaths fixtureDirectory
-
+/// project reference. The scenarios share one engine build, so their restores and builds leave the
+/// referenced project alone and only read its outputs.
+let private buildFsproj =
     $"""<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <OutputType>Exe</OutputType>
         <TargetFramework>net10.0</TargetFramework>
         <NoWarn>NU1510</NoWarn>
         <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+        <RestoreRecursive>false</RestoreRecursive>
+        <BuildProjectReferences>false</BuildProjectReferences>
     </PropertyGroup>
     <ItemGroup>
         <Compile Include="Build.fs" />
@@ -158,12 +200,8 @@ let private buildFsproj fixtureDirectory =
 </Project>
 """
 
-/// The restores below — the one `dotnet pack` runs for itself included — populate the machine-wide
-/// NuGet package cache, which the scenarios would otherwise write concurrently.
-let private restoreLock = obj ()
-
 /// Copies a checked-in fixture to a throwaway directory and completes it into a runnable consumer
-/// repo: the `build.fsproj` carrying the absolute engine path and isolated output paths, a git repo,
+/// repo: the `build.fsproj` carrying the absolute engine path and its shared output paths, a git repo,
 /// which the engine's `Git.init` requires because it shells out to `git rev-parse HEAD`, and the
 /// support files, deployed by the engine's own `Bootstrap` target. A fixture declaring its packages
 /// through Paket is restored the way the deployed `build.sh` restores it.
@@ -177,12 +215,9 @@ let private prepare fixture =
     let dir = Path.Combine (Path.GetTempPath (), $"fbuild-it-{fixtureName}-{Guid.NewGuid():N}")
     copyInto (Path.Combine (fixtures, fixtureName)) dir
 
-    File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), buildFsproj dir)
+    File.WriteAllText (Path.Combine (dir, "build", "build.fsproj"), buildFsproj)
 
-    let engineIntermediate, engineOutput = engineBuildPaths dir
-
-    lock restoreLock (fun () ->
-        execOk root "dotnet" $"restore \"{engineProject}\" /p:BaseIntermediateOutputPath=\"{engineIntermediate}\" /p:BaseOutputPath=\"{engineOutput}\"")
+    engineBuild.Force ()
 
     execOk dir "git" "init"
     execOk dir "git" "-c user.email=test@example.com -c user.name=Test -c commit.gpgsign=false commit --allow-empty -m init"
@@ -259,12 +294,13 @@ let private packEngine (dir: string) (feed: string) =
     let intermediate = Path.Combine (dir, "engine-obj")
     let output = Path.Combine (dir, "engine-bin")
 
-    let args =
-        $"pack \"{engineProject}\" -c Release -o \"{feed}\" /p:Version={packagedVersion} "
+    let paths =
+        $"/p:Version={packagedVersion} "
         + $"/p:BaseIntermediateOutputPath=\"{intermediate}{separator}\" "
         + $"/p:BaseOutputPath=\"{output}{separator}\""
 
-    lock restoreLock (fun () -> execOk root "dotnet" args)
+    lock restoreLock (fun () -> execOk root "dotnet" $"restore \"{engineProject}\" {paths}")
+    execOk root "dotnet" $"pack \"{engineProject}\" --no-restore -c Release -o \"{feed}\" {paths}"
 
 /// Completes a fixture copy into a consumer that resolves the engine as a NuGet package, following
 /// the adoption steps in `README.md`: paket files pinning the engine, the consumer `build.fsproj`,
@@ -306,6 +342,29 @@ let private keepTemp =
 let private cleanup (dir: string) =
     if keepTemp then printfn $"FBUILD_KEEP_TEMP set, kept fixture copy: {dir}"
     else Directory.Delete (dir, true)
+
+/// A source-engine fixture prepared and run through `target` once, on first use, for tests that only
+/// read its directory. A failed preparation or run is cached and fails every test that reads it.
+/// Release it with `releaseSharedFixture` from `afterRunTests`.
+let sharedFixture fixture (target: string) =
+    lazy (
+        let dir = prepare fixture
+
+        try
+            execOk dir "dotnet" $"run --project build/build.fsproj -- {target}"
+            dir
+        with _ ->
+            cleanup dir
+            reraise ()
+    )
+
+/// Deletes a shared fixture's directory, if any test forced it.
+let releaseSharedFixture (shared: Lazy<string>) =
+    if shared.IsValueCreated then cleanup shared.Value
+
+/// Deletes the shared engine build, if any fixture needed it.
+let releaseEngineBuild () =
+    if Directory.Exists engineBuildDirectory then cleanup engineBuildDirectory
 
 /// Runs a target against a freshly prepared source-engine fixture, handing the copy to `edit`
 /// before it and the directory to the assertion callback after it. Set `FBUILD_KEEP_TEMP` to keep

@@ -19,6 +19,7 @@
 - `bin/migrate-safe-stack-tests` and `bin/migrate-library-fable-tests` stop on Expecto.FsCheck 10 or FsCheck 2 until the tests move to Expecto.FsCheck 11 and FsCheck 3, see `docs/migration/fable-tests/references/fscheck.md`
 - Add `bin/upgrade-vite` in the engine repository, moving a project onto Vitest 5 and a SAFE-stack client onto Vite 8 and `@vitejs/plugin-react` 6
 - Add `bin/migrate-to-alma-build` in the engine repository, moving a repository from the hand-copied FAKE build onto `Alma.Build` 4
+- Print each test suite's output in `Tests` as one block as soon as that suite finishes
 
 ## 3.1.0 - 2026-10-14
 - Fix `RaspberryPiHassioAddon` to use real framework target `linux-musl-arm64`

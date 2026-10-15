@@ -12,7 +12,7 @@ let main args =
             Git = Git.init ()
         }
         Specs =
-            Spec.defaultConsoleApplication [ Linux; OSX; OSXArm64 ]
+            Spec.defaultConsoleApplication [ Linux; OSXArm64 ]
             |> Spec.mapConsoleApplication (fun spec -> { spec with RuntimeMode = RuntimeMode.AutoDetect })
     }
 

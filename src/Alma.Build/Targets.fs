@@ -178,8 +178,11 @@ module Targets =
 
         let run command arguments directory =
             requireRuntimeProps command
-
             Command.run command (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments) directory
+
+        let toJob name command arguments directory =
+            requireRuntimeProps command
+            Command.toJob name command (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments) directory
 
         let runInRoot command arguments = run command arguments "."
 
@@ -333,7 +336,7 @@ module Targets =
         Target.create "Lint" <| skipOn "no-lint" (fun _ ->
             Seq.append definition.Sources.Build (!! "build/*.fsproj")
             |> Seq.map (fun fsproj -> toJob (JobName fsproj) (Dotnet Lint) [ fsproj ] ".")
-            |> runParallelWith GroupedByJob
+            |> runParallelWith (GroupedByJob JobOrder)
         )
 
         Target.create "InstallNpm" (fun _ ->
@@ -366,14 +369,7 @@ module Targets =
             fableSuites |> List.iter (fun suite -> Shell.deleteDir (suite.Path </> "output"))
 
         let runTestSuites watch =
-            let job (name: string) command arguments directory =
-                requireRuntimeProps command
-
-                toJob
-                    (JobName (Solution.relativeTo (Directory.GetCurrentDirectory ()) name))
-                    command
-                    (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments)
-                    directory
+            let job (name: string) = toJob (JobName (Solution.relativeTo (Directory.GetCurrentDirectory ()) name))
 
             match testSuites with
             | [] -> Trace.tracefn "There are no tests yet."
@@ -387,7 +383,8 @@ module Targets =
                     | TestSuite.Fable suite when watch -> job suite.Path (Dotnet FableWatch) (FableSuites.fableArguments []) suite.Path
                     | TestSuite.Fable suite -> job suite.Path (Dotnet Fable) (FableSuites.fableArguments [ "run" ]) suite.Path
                 )
-                |> runParallel
+                // Watch jobs never exit, so they cannot be grouped.
+                |> if watch || suites.Length = 1 then runParallel else runParallelWith (GroupedByJob CompletionOrder)
 
         Target.create "Tests" (fun _ -> runTestSuites false)
         Target.create "WatchTests" (fun _ -> runTestSuites true)
@@ -454,7 +451,7 @@ module Targets =
                             (ConsoleRelease.publishArguments publishSingleFile releaseDir releaseSource runtimeTarget)
                             "."
                     )
-                    |> runParallelWith GroupedByJob
+                    |> runParallelWith (GroupedByJob JobOrder)
 
                     runtimeTargets |> zipRelease releaseDir
 
