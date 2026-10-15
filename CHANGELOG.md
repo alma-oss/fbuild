@@ -2,6 +2,7 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- `Solution` now lists `build/build.fsproj`, so IDEs load the build project, and leaves it out of the `Build` target, since `build.sh` already compiles it. Rerun `Solution` and commit the regenerated solution.
 
 ## 3.1.0 - 2026-10-14
 - Fix `RaspberryPiHassioAddon` to use real framework target `linux-musl-arm64`
