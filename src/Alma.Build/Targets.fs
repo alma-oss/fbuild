@@ -107,10 +107,8 @@ module Targets =
             )
 
             Target.create "Tests" (fun _ ->
-                run (Dotnet Build) [] safe.SharedTestsPath
-
                 [
-                    toJob (JobName "server") (Dotnet Tests) [] safe.ServerTestsPath
+                    toJob (JobName "server") (Dotnet Tests) [ "--no-build" ] safe.ServerTestsPath
                     toJob (JobName "client") (Dotnet Fable) [ "-o"; "output"; "-s"; "--run"; "npx"; "mocha"; "output" ] safe.ClientTestsPath
                 ]
                 |> runParallel
@@ -147,14 +145,20 @@ module Targets =
                 | Ok runtimeIdentifier -> runtimeIdentifier
                 | Error error -> error |> RuntimeConfigurationError.format |> failwith
 
-        let run command arguments directory =
+        let requireRuntimeProps command =
             // If building for a specific runtime and the runtime props file is missing, fail early.
             match buildRuntimeIdentifier with
             | Some _ when CommandArguments.takesRuntimeIdentifier command && not (File.exists RuntimeProps.path) ->
                 failwithf "%s is missing. Building for a specific runtime needs it. Run the Bootstrap target first." RuntimeProps.path
             | _ -> ()
 
+        let run command arguments directory =
+            requireRuntimeProps command
             Command.run command (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments) directory
+
+        let toJob name command arguments directory =
+            requireRuntimeProps command
+            Command.toJob name command (CommandArguments.withRuntimeIdentifier buildRuntimeIdentifier command arguments) directory
 
         let runInRoot command arguments = run command arguments "."
 
@@ -301,16 +305,18 @@ module Targets =
         Target.create "Lint" <| skipOn "no-lint" (fun _ ->
             Seq.append definition.Sources.Build (!! "build/*.fsproj")
             |> Seq.map (fun fsproj -> toJob (JobName fsproj) (Dotnet Lint) [ fsproj ] ".")
-            |> runParallelWith GroupedByJob
+            |> runParallelWith (GroupedByJob JobOrder)
         )
 
         if not definition.Specs.IsSAFEStack then
             Target.create "Tests" (fun _ ->
                 match definition.Sources.Tests |> List.ofSeq with
                 | [] -> Trace.tracefn "There are no tests yet."
+                | [ project ] -> run (Dotnet Tests) [ "--no-build"; "--project"; project ] "."
                 | projects ->
                     projects
-                    |> List.iter (fun project -> run (Dotnet Tests) [ "--no-build"; "--project"; project ] ".")
+                    |> List.map (fun project -> toJob (JobName project) (Dotnet Tests) [ "--no-build"; "--project"; project ] ".")
+                    |> runParallelWith (GroupedByJob CompletionOrder)
             )
 
             let zipRelease releaseDir runtimeTargets =
@@ -373,7 +379,7 @@ module Targets =
                             (ConsoleRelease.publishArguments publishSingleFile releaseDir releaseSource runtimeTarget)
                             "."
                     )
-                    |> runParallelWith GroupedByJob
+                    |> runParallelWith (GroupedByJob JobOrder)
 
                     runtimeTargets |> zipRelease releaseDir
 

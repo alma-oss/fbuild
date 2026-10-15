@@ -90,7 +90,7 @@ dotnet run --project tests/integration/integration.fsproj -- --filter-test-case 
 ```
 
 Unit tests cover runtime selection and command argument propagation. The console integration
-scenario publishes Linux x64 and both macOS architectures and checks their unbundled archives.
+scenario publishes Linux x64 and macOS arm64 and checks their unbundled archives.
 
 ## When the engine will not build
 
