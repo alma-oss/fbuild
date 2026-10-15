@@ -51,6 +51,22 @@ module Targets =
                 releaseSource
             ]
 
+    [<RequireQualifiedAccess>]
+    module internal Clean =
+        /// Whether `path` lies inside a git working tree nested below `root`: a worktree or a repository
+        /// of its own, whose build outputs belong to that tree.
+        let isInNestedWorkingTree (root: string) (path: string) =
+            let root = IO.Path.GetFullPath root |> IO.Path.TrimEndingDirectorySeparator
+
+            let rec check (directory: DirectoryInfo) =
+                match directory with
+                | null -> false
+                | directory when directory.FullName = root -> false
+                | directory when IO.Path.Exists (IO.Path.Combine (directory.FullName, ".git")) -> true
+                | directory -> check directory.Parent
+
+            check (DirectoryInfo (IO.Path.GetFullPath path))
+
     // --------------------------------------------------------------------------------------------------------
     // 2. Targets for FAKE
     // --------------------------------------------------------------------------------------------------------
@@ -200,8 +216,8 @@ module Targets =
             ++ "./**/bin/Debug"
             ++ "./**/obj"
             ++ "./**/.ionide"
-            -- "./bin/console"
             -- "./build/**"
+            |> Seq.filter (Clean.isInNestedWorkingTree "." >> not)
             |> Shell.cleanDirs
         )
 
