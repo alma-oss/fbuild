@@ -2,6 +2,7 @@ module Alma.Build.Tests.CommandTests
 
 open Expecto
 open Alma.Build.Command
+open Alma.Build.RtkFilter
 
 [<Tests>]
 let renderTests =
@@ -16,6 +17,15 @@ let renderTests =
             let result = Command.render (Nuget AddSource)
 
             Expect.equal result ("dotnet", [ "nuget"; "add"; "source" ]) "Nuget AddSource composes onto the shared nuget verb"
+        }
+
+        test "should compile into output and run Vitest once under NODE_ENV=test when given Dotnet FableTests" {
+            let result = Command.render (Dotnet FableTests)
+
+            Expect.equal
+                result
+                ("dotnet", [ "fable"; "-o"; "output"; "-s"; "--noRestore"; "--run"; "env"; "NODE_ENV=test"; "npx"; "vitest"; "run" ])
+                "Fable compiles the restored project into output, then Vitest runs under NODE_ENV=test"
         }
     ]
 
@@ -47,7 +57,23 @@ let modeTests =
         }
 
         test "should route through raw with a filter when given Dotnet Fable" {
-            Expect.equal (modeOf (Dotnet Fable)) (Rtk.Transport.Raw, true) "fable is filtered by the engine, which keeps a failing test's stack whole"
+            Expect.equal (modeOf (Dotnet Fable)) (Rtk.Transport.Raw, true) "fable is filtered by the engine"
+        }
+
+        test "should route through raw with a filter when given Dotnet FableTests" {
+            Expect.equal (modeOf (Dotnet FableTests)) (Rtk.Transport.Raw, true) "a Vitest run is filtered by the engine, which parses its report"
+        }
+    ]
+
+[<Tests>]
+let argumentsTests =
+    testList "Rtk.arguments" [
+        test "should ask Vitest for its JSON report when given Dotnet FableTests" {
+            Expect.equal (Rtk.arguments (Dotnet FableTests)) [ "--reporter=json" ] "the Vitest filter parses the JSON report"
+        }
+
+        test "should add nothing when given another command" {
+            Expect.isEmpty (Rtk.arguments (Dotnet Build)) "only a command whose filter needs it gets extra arguments"
         }
     ]
 
@@ -81,21 +107,32 @@ let exitCodeTests =
 
 [<Tests>]
 let shouldTeeTests =
+    let lines = List.map Line.stdout
+    let captured = lines >> CapturedOutput
+
     testList "shouldTee" [
         test "should not tee when the run succeeded" {
-            let result = shouldTee (ExitCode 0) (CapturedOutput "a\nb\nc\n") [ "a" ]
+            let result = shouldTee (ExitCode 0) (captured [ "a"; "b"; "c" ]) (lines [ "a" ])
 
             Expect.isFalse result "a clean run needs no full-output log even if the filter dropped lines"
         }
 
         test "should tee when a failing run had meaningful lines suppressed" {
-            let result = shouldTee (ExitCode 1) (CapturedOutput "a\nb\nc\n") [ "summary" ]
+            let result = shouldTee (ExitCode 1) (captured [ "a"; "b"; "c" ]) (lines [ "summary" ])
 
             Expect.isTrue result "a failure whose filter hid meaningful output is worth teeing"
         }
 
+        test "should tee when a failing run had only stderr lines suppressed" {
+            let raw = CapturedOutput [ Line.stdout "a"; { Stream = Stderr; Text = "b" } ]
+
+            let result = shouldTee (ExitCode 1) raw (lines [ "a" ])
+
+            Expect.isTrue result "stderr counts toward what the filter hid"
+        }
+
         test "should not tee when a failing run kept every meaningful line" {
-            let result = shouldTee (ExitCode 1) (CapturedOutput "a\nb\n") [ "a"; "b" ]
+            let result = shouldTee (ExitCode 1) (captured [ "a"; "b"; "" ]) (lines [ "a"; "b" ])
 
             Expect.isFalse result "a failure that suppressed nothing meaningful needs no full-output log"
         }

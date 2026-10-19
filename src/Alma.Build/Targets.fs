@@ -82,11 +82,6 @@ module Targets =
                     if suites |> List.exists (fun suite -> suite.Environment = VitestEnvironment.Jsdom) then "jsdom"
                 ]
 
-        /// `Build` has restored every project before a suite runs. `fable --run` forces `NODE_ENV=production` on the
-        /// command it runs, and `env` resets it: under `production`, Vite reports a production build.
-        let fableArguments (vitestArguments: string list) =
-            [ "-o"; "output"; "-s"; "--noRestore"; "--run"; "env"; "NODE_ENV=test"; "npx"; "vitest" ] @ vitestArguments
-
     [<RequireQualifiedAccess>]
     module internal DotNetSuite =
         let testsArguments project = [ "--no-build"; "--project"; project ]
@@ -380,8 +375,8 @@ module Targets =
                 |> List.map (function
                     | TestSuite.DotNet project when watch -> job project (Dotnet WatchRun) [] (DotNetSuite.watchDirectory project)
                     | TestSuite.DotNet project -> job project (Dotnet Tests) (DotNetSuite.testsArguments project) "."
-                    | TestSuite.Fable suite when watch -> job suite.Path (Dotnet FableWatch) (FableSuites.fableArguments []) suite.Path
-                    | TestSuite.Fable suite -> job suite.Path (Dotnet Fable) (FableSuites.fableArguments [ "run" ]) suite.Path
+                    | TestSuite.Fable suite when watch -> job suite.Path (Dotnet FableWatch) Command.fableVitestArguments suite.Path
+                    | TestSuite.Fable suite -> job suite.Path (Dotnet FableTests) [] suite.Path
                 )
                 // Watch jobs never exit, so they cannot be grouped.
                 |> if watch || suites.Length = 1 then runParallel else runParallelWith (GroupedByJob CompletionOrder)

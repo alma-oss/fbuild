@@ -3,15 +3,31 @@ namespace Alma.Build
 /// Buffered output filters for RTK-wrapped build commands.
 module internal RtkFilter =
     open System.IO
+    open System.Text.Json
     open System.Text.RegularExpressions
 
-    type Filter = { Run: string list -> int -> string list }
+    type Stream =
+        | Stdout
+        | Stderr
+
+    /// One line a process wrote, newline stripped.
+    type Line = { Stream: Stream; Text: string }
+
+    [<RequireQualifiedAccess>]
+    module Line =
+        let text (line: Line) = line.Text
+
+        let stdout (text: string) = { Stream = Stdout; Text = text }
+
+        let mapText (f: string -> string) (line: Line) = { line with Text = f line.Text }
+
+    type Filter = { Run: Line list -> int -> Line list }
 
     [<RequireQualifiedAccess>]
     module Filter =
-        let create (run: string list -> int -> string list): Filter = { Run = run }
+        let create (run: Line list -> int -> Line list): Filter = { Run = run }
 
-        let ofLines (f: string list -> string list): Filter = create (fun lines _ -> f lines)
+        let ofLines (f: Line list -> Line list): Filter = create (fun lines _ -> f lines)
 
         let passthrough: Filter = ofLines id
 
@@ -19,7 +35,7 @@ module internal RtkFilter =
         let okWhenEmpty (message: string) (inner: Filter): Filter =
             create (fun lines exitCode ->
                 match inner.Run lines exitCode with
-                | [] -> if exitCode = 0 then [ message ] else lines
+                | [] -> if exitCode = 0 then [ Line.stdout message ] else lines
                 | kept -> kept
             )
 
@@ -53,15 +69,15 @@ module internal RtkFilter =
         /// code-less `error :` is never summarised away.
         let private diagnostics (isNoise: string -> bool) (label: string) (repoRoot: string): Filter =
             let keep =
-                List.filter (fun line -> isDiagnostic line && not (isNoise line))
-                >> List.map (relativize repoRoot)
-                >> List.distinct
+                List.filter (fun (line: Line) -> isDiagnostic line.Text && not (isNoise line.Text))
+                >> List.map (Line.mapText (relativize repoRoot))
+                >> List.distinctBy Line.text
 
             create (fun lines exitCode ->
                 let unwhitelistedError =
                     exitCode <> 0
                     && lines
-                       |> List.exists (fun line -> isError line && not (isDiagnostic line) && not (isNoise line))
+                       |> List.exists (fun { Text = text } -> isError text && not (isDiagnostic text) && not (isNoise text))
 
                 if unwhitelistedError then lines else keep lines
             )
@@ -240,12 +256,15 @@ module internal RtkFilter =
         /// warnings present — hands back its raw output.
         let private fsharplintSummary (repoRoot: string): Filter =
             ofLines (fun lines ->
-                match Fsharplint.parse repoRoot lines, Fsharplint.reportedCount lines with
+                let texts = lines |> List.map Line.text
+
+                match Fsharplint.parse repoRoot texts, Fsharplint.reportedCount texts with
                 | warnings, Some reported when reported <> List.length warnings ->
-                    Fsharplint.driftNotice (List.length warnings) reported :: lines
+                    Line.stdout (Fsharplint.driftNotice (List.length warnings) reported) :: lines
                 | [], _ -> []
-                | _, None -> Fsharplint.noSummaryNotice :: lines
-                | warnings, Some _ -> Fsharplint.header warnings :: List.map Fsharplint.format warnings
+                | _, None -> Line.stdout Fsharplint.noSummaryNotice :: lines
+                | warnings, Some _ ->
+                    Fsharplint.header warnings :: List.map Fsharplint.format warnings |> List.map Line.stdout
             )
 
         let fsharplint (repoRoot: string): Filter =
@@ -257,11 +276,8 @@ module internal RtkFilter =
 
         /// `dotnet fable` prints a banner, plugin loads, and per-file progress, closing a clean run
         /// with `Compiled N/M: <file>` and `Fable compilation finished in <ms>ms` — a few hundred
-        /// lines with no diagnostics. A successful run collapses to that tally, plus the `Test Files`
-        /// and `Tests` summary of a Vitest run started through `--run`; a failing one shows its raw
-        /// output, since neither a compile error nor a failing test's stack is shaped like an MSBuild
-        /// diagnostic, and either must never be summarised away. Fable prints diagnostic paths
-        /// relative to its cwd already, so there is nothing to relativize.
+        /// lines with no diagnostics. Fable prints diagnostic paths relative to its cwd already, so
+        /// there is nothing to relativize.
         module private Fable =
             let private compiledTally = Regex @"^Compiled (\d+)/(\d+):"
             let private finishedIn = Regex @"Fable compilation finished in (\d+)ms"
@@ -285,53 +301,192 @@ module internal RtkFilter =
             let isDiagnostic (line: string) =
                 Regex.IsMatch (line, @"\b(error|warning)\b", RegexOptions.IgnoreCase)
 
-            let vitestSummary (lines: string list) =
-                lines
-                |> List.filter (fun line -> Regex.IsMatch (line, @"^\s*(Test Files|Tests)\s{2,}\S"))
-                |> List.map (fun line -> line.Trim ())
-
+        /// A clean run collapses to its compile tally; a run with diagnostics keeps them alone. A failing
+        /// run with none shows its raw output, so a failure this cannot name is never summarised away.
         let fable: Filter =
             create (fun lines exitCode ->
-                if exitCode <> 0 then
-                    lines
-                else
-                    let lines = lines |> List.map withoutAnsi
+                let plain = lines |> List.map (Line.mapText withoutAnsi)
 
-                    match lines |> List.filter Fable.isDiagnostic |> List.distinct with
-                    | [] -> (Fable.summary lines |> Option.defaultValue "fable: ok") :: Fable.vitestSummary lines
-                    | diagnostics -> diagnostics
+                match plain |> List.filter (Line.text >> Fable.isDiagnostic) |> List.distinctBy Line.text with
+                | [] when exitCode <> 0 -> lines
+                | [] -> [ plain |> List.map Line.text |> Fable.summary |> Option.defaultValue "fable: ok" |> Line.stdout ]
+                | diagnostics -> diagnostics
             )
 
-        /// A test run collapses to Expecto's `EXPECTO! … tests run …` summary, or `tests: ok` from a
-        /// runner that prints none; a failing one shows its raw output, so the failing test's name and
-        /// message are never summarised away.
-        let tests: Filter =
+        /// Vitest started with `--reporter=json` writes its whole report as one line on stdout, which
+        /// Fable's `--run` prefixes with its own colour codes:
+        ///
+        ///     {"numTotalTestSuites":3,…,"numFailedTests":1,…,"testResults":[{"assertionResults":[{
+        ///       "ancestorTitles":["Shared","Doubling"],"title":"should double …","status":"failed",
+        ///       "failureMessages":["Error: Doubling 21 must give 42.\n…\n    at Array.test (/abs/tests/Shared/Doubling.fs:9:13)\n…"]
+        ///     }],"status":"failed","message":"","name":"/abs/tests/Shared/output/Shared.Tests.js"}]}
+        module private Vitest =
+            let private reportStart = "{\"numTotalTestSuites\""
+            let private stackFrame = Regex @"^\s*at "
+
+            /// A frame in the suite's own F# source, which source maps resolve the compiled JS to.
+            /// Frames in `fable_modules` belong to the suite's dependencies.
+            let private isOwnFrame (line: string) =
+                Regex.IsMatch (line, @"\.fs:\d+:\d+\)?$") && not (line.Contains "fable_modules")
+
+            let private shownFailures = 10
+
+            type Failure = {
+                /// `Shared > Doubling > should double …`, or the test file's path when the file itself
+                /// failed, such as on an import error.
+                Name: string
+                /// The error message, then the frames in the suite's own F# source.
+                Details: string list
+            }
+
+            type Report = {
+                Passed: int
+                Failed: int
+                /// Skipped and todo tests.
+                Skipped: int
+                Total: int
+                Failures: Failure list
+            }
+
+            let private details repoRoot (message: string) =
+                message.Split '\n'
+                |> Array.toList
+                |> List.choose (fun line ->
+                    match stackFrame.IsMatch line with
+                    | true when isOwnFrame line -> Some (line.Trim ())
+                    | true -> None
+                    | false when System.String.IsNullOrWhiteSpace line -> None
+                    | false -> Some (line.TrimEnd ())
+                )
+                |> List.map (relativize repoRoot)
+
+            let private failuresOf repoRoot (file: JsonElement) =
+                let text (name: string) (element: JsonElement) = element.GetProperty(name).GetString ()
+
+                let failedTests =
+                    file.GetProperty("assertionResults").EnumerateArray ()
+                    |> Seq.filter (text "status" >> (=) "failed")
+                    |> Seq.map (fun test -> {
+                        Name =
+                            Seq.append
+                                (test.GetProperty("ancestorTitles").EnumerateArray () |> Seq.map _.GetString())
+                                [ text "title" test ]
+                            |> String.concat " > "
+                        Details =
+                            test.GetProperty("failureMessages").EnumerateArray ()
+                            |> Seq.toList
+                            |> List.collect (_.GetString() >> details repoRoot)
+                    })
+                    |> Seq.toList
+
+                match failedTests, text "status" file with
+                | [], "failed" -> [ { Name = relativize repoRoot (text "name" file); Details = details repoRoot (text "message" file) } ]
+                | failedTests, _ -> failedTests
+
+            let private parse repoRoot (json: string): Report =
+                use document = JsonDocument.Parse json
+                let root = document.RootElement
+                let count (name: string) = root.GetProperty(name).GetInt32 ()
+
+                {
+                    Passed = count "numPassedTests"
+                    Failed = count "numFailedTests"
+                    Skipped = count "numPendingTests" + count "numTodoTests"
+                    Total = count "numTotalTests"
+                    Failures = root.GetProperty("testResults").EnumerateArray () |> Seq.toList |> List.collect (failuresOf repoRoot)
+                }
+
+            /// `None` when the run wrote no report, or one this cannot read.
+            let tryReport repoRoot (lines: string list) =
+                lines
+                |> List.tryPick (fun line ->
+                    match line.IndexOf reportStart with
+                    | -1 -> None
+                    | index -> Some (line.Substring index)
+                )
+                |> Option.bind (fun json ->
+                    try Some (parse repoRoot json) with _ -> None
+                )
+
+            /// `vitest: 1 failed, 3 passed, 1 skipped (5)`
+            let private header (report: Report) =
+                let counts = [
+                    if report.Failed > 0 then sprintf "%d failed" report.Failed
+                    sprintf "%d passed" report.Passed
+                    if report.Skipped > 0 then sprintf "%d skipped" report.Skipped
+                ]
+
+                sprintf "vitest: %s (%d)" (String.concat ", " counts) report.Total
+
+            let private format (failure: Failure) =
+                sprintf "  × %s" failure.Name :: List.map (sprintf "    %s") failure.Details
+
+            let summary (report: Report) =
+                let shown = report.Failures |> List.truncate shownFailures
+                let hidden = report.Failures.Length - shown.Length
+
+                [
+                    header report
+                    yield! shown |> List.collect format
+                    if hidden > 0 then sprintf "  … %d more failures" hidden
+                ]
+
+        /// Collapses a Fable-compiled suite run under Vitest with `--reporter=json` to the compile
+        /// tally, the report's counts, and each failing test with its message and its frames in the
+        /// suite's own F# source, paths relative to `repoRoot`. Without a report that agrees with the
+        /// exit code, a failing run is filtered as a failing compile and a clean one is shown raw.
+        let vitest (repoRoot: string): Filter =
             create (fun lines exitCode ->
-                if exitCode <> 0 then
-                    lines
-                else
-                    lines
-                    |> List.map withoutAnsi
-                    |> List.choose (fun line ->
-                        match line.IndexOf "EXPECTO! " with
-                        | -1 -> None
-                        | index -> Some (sprintf "tests: %s" (line.Substring(index + "EXPECTO! ".Length).Replace(" <Expecto>", "").Trim ())))
-                    |> function
-                        | [] -> [ "tests: ok" ]
-                        | summaries -> summaries
+                let texts = lines |> List.map (Line.text >> withoutAnsi)
+
+                match Vitest.tryReport repoRoot texts with
+                | Some report when (exitCode = 0) = List.isEmpty report.Failures ->
+                    Option.toList (Fable.summary texts) @ Vitest.summary report |> List.map Line.stdout
+                | _ when exitCode = 0 -> lines
+                | _ -> fable.Run lines exitCode
             )
 
-    /// Splitting a newline-terminated output yields an empty final line; dropping it here keeps
-    /// every filter — and the caller, which prints one newline per line — from seeing a blank one.
-    let toLines (captured: string) =
-        captured.Split '\n'
-        |> Array.toList
-        |> List.map (fun line -> line.TrimEnd '\r')
-        |> List.rev
-        |> function
-            | "" :: rest -> rest
-            | lines -> lines
-        |> List.rev
+        module private Expecto =
+            let private runningBanner = "EXPECTO? "
+            let private summaryMarker = "EXPECTO! "
+            let private tag = " <Expecto>"
+            let private frameworkFrame = Regex @"^\s*at (Expecto|Microsoft\.FSharp|System)\."
 
-    let runBuffered (filter: Filter) (captured: string) (exitCode: int): string list =
-        filter.Run (toLines captured) exitCode
+            /// `tests: 2 tests run in … – 1 passed, …`, or `None` for any line but Expecto's summary.
+            let summary (line: Line) =
+                match line.Text.IndexOf summaryMarker with
+                | -1 -> None
+                | index ->
+                    Some { line with Text = sprintf "tests: %s" (line.Text.Substring(index + summaryMarker.Length).Replace(tag, "").Trim ()) }
+
+            /// Everything but the start banner, blank lines, and the stack frames inside Expecto,
+            /// FSharp.Core and the BCL — what is left names each failing test, its message, and the
+            /// test's own frames, with paths relative to `repoRoot`.
+            let failure (repoRoot: string) (lines: Line list) =
+                lines
+                |> List.choose (fun line ->
+                    match summary line with
+                    | Some summary -> Some summary
+                    | None when
+                        line.Text.Contains runningBanner
+                        || frameworkFrame.IsMatch line.Text
+                        || System.String.IsNullOrWhiteSpace line.Text
+                        ->
+                        None
+                    | None -> Some (line |> Line.mapText (fun text -> (text.Replace (tag, "") |> relativize repoRoot).TrimEnd ()))
+                )
+
+        /// A clean test run collapses to Expecto's `EXPECTO! … tests run …` summary, or `tests: ok`
+        /// from a runner that prints none. A failing one drops only lines known to be noise, so an
+        /// unfamiliar runner's failure still shows in full.
+        let tests (repoRoot: string): Filter =
+            create (fun lines exitCode ->
+                let lines = lines |> List.map (Line.mapText withoutAnsi)
+
+                if exitCode <> 0 then
+                    Expecto.failure repoRoot lines
+                else
+                    match lines |> List.choose Expecto.summary with
+                    | [] -> [ Line.stdout "tests: ok" ]
+                    | summaries -> summaries
+            )

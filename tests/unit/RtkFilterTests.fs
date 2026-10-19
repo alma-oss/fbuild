@@ -5,8 +5,9 @@ open Alma.Build.RtkFilter
 
 let private repoRoot = "/repo"
 
-/// Apply a filter to already-split lines at a given exit code.
-let private filtered (filter: Filter) exitCode lines = filter.Run lines exitCode
+/// Apply a filter to stdout lines at a given exit code, returning the text of the lines it keeps.
+let private filtered (filter: Filter) exitCode lines =
+    filter.Run (List.map Line.stdout lines) exitCode |> List.map Line.text
 
 /// The tool's window separator is a full-width rule; the parser only treats it as a boundary
 /// at the real width, so samples must use it.
@@ -32,7 +33,7 @@ let okWhenEmptyTests =
         }
 
         test "should keep inner output when it is non-empty" {
-            let filter = Filter.ofLines (fun _ -> [ "kept" ]) |> Filter.okWhenEmpty "all good"
+            let filter = Filter.ofLines (fun _ -> [ Line.stdout "kept" ]) |> Filter.okWhenEmpty "all good"
 
             let result = filtered filter 0 [ "in" ]
 
@@ -297,10 +298,19 @@ let fableTests =
             Expect.equal result [ "fable: compiled 198/198 in 13684ms" ] "a successful compile reduces to a single tally line"
         }
 
-        test "should show raw output when the run fails" {
+        test "should show raw output when a failing run names no error and ran no tests" {
             let result = filtered filter 1 cleanRun
 
-            Expect.equal result cleanRun "a failing compile shows its raw output so the error is never hidden"
+            Expect.equal result cleanRun "a failure the filter cannot name shows its raw output so it is never hidden"
+        }
+
+        test "should keep only the compile errors when compilation fails" {
+            let error = "./src/Client/Api.fs(9,11): (9,12) error FSHARP: The value 'x' is not defined. (code 39)"
+            let failingCompile = cleanRun @ [ error; error; "Compilation failed" ]
+
+            let result = filtered filter 1 failingCompile
+
+            Expect.equal result [ error ] "a failing compile reduces to its deduplicated errors"
         }
 
         test "should keep a diagnostic when a clean run emitted a warning" {
@@ -326,43 +336,119 @@ let fableTests =
 
             Expect.equal result [ "fable: compiled 198/198 in 13684ms" ] "colour codes do not hide the tally"
         }
+    ]
 
-        test "should keep Vitest's summary after the tally when a clean run ran tests" {
-            let vitestRun =
-                cleanRun @ [
-                    " ✓ output/Shared.Tests.js (1 test) 8ms"
-                    ""
-                    " Test Files  1 passed (1)"
-                    "      Tests  1 passed (1)"
-                    "   Start at  11:10:29"
-                ]
+[<Tests>]
+let vitestTests =
+    let filter = Filter.vitest repoRoot
 
-            let result = filtered filter 0 vitestRun
+    let compiled = [
+        "Started Fable compilation..."
+        "Compiled 5/5: Doubling.fs"
+        "Fable compilation finished in 2542ms"
+        ".> env NODE_ENV=test npx vitest run --reporter=json"
+    ]
+
+    let tally = "fable: compiled 5/5 in 2542ms"
+
+    let failingTest =
+        """{"ancestorTitles":["Shared","Doubling"],"title":"should double the value when given a number","status":"failed","failureMessages":["Error: Doubling 21 must give 42.\nexpected: 43\n  actual: 42\n    at failWithDiff (/repo/tests/Shared/output/fable_modules/Alma.Testing.1.0.0/Testing.fs:133:16)\n    at Array.test (/repo/tests/Shared/Doubling.fs:9:13)\n    at runTest (file:///repo/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)"]}"""
+
+    let passingTest =
+        """{"ancestorTitles":["Shared"],"title":"should pass","status":"passed","failureMessages":[]}"""
+
+    let file status message (tests: string list) =
+        sprintf
+            """{"assertionResults":[%s],"status":"%s","message":"%s","name":"/repo/tests/Shared/output/Shared.Tests.js"}"""
+            (String.concat "," tests)
+            status
+            message
+
+    /// The report line as Fable's `--run` prints it, behind its own colour codes.
+    let report (failed, passed, skipped) (files: string list) =
+        sprintf
+            "\u001b[39m\u001b[22m{\"numTotalTestSuites\":3,\"numTotalTests\":%d,\"numPassedTests\":%d,\"numFailedTests\":%d,\"numPendingTests\":%d,\"numTodoTests\":0,\"testResults\":[%s]}"
+            (failed + passed + skipped)
+            passed
+            failed
+            skipped
+            (String.concat "," files)
+
+    testList "Filter.vitest" [
+        test "should collapse to the tally and the counts when every test passes" {
+            let run = compiled @ [ report (0, 2, 1) [ file "passed" "" [ passingTest; passingTest ] ] ]
+
+            let result = filtered filter 0 run
+
+            Expect.equal result [ tally; "vitest: 2 passed, 1 skipped (3)" ] "a passing run reports what ran and what was skipped"
+        }
+
+        test "should keep each failing test with its message and own frames when a test fails" {
+            let run = compiled @ [ report (1, 1, 0) [ file "failed" "" [ failingTest; passingTest ] ]; "\u001b[31mCompilation failed" ]
+
+            let result = filtered filter 1 run
 
             Expect.equal
                 result
-                [ "fable: compiled 198/198 in 13684ms"; "Test Files  1 passed (1)"; "Tests  1 passed (1)" ]
-                "a passing test run reports how many files and tests passed"
+                [
+                    tally
+                    "vitest: 1 failed, 1 passed (2)"
+                    "  × Shared > Doubling > should double the value when given a number"
+                    "    Error: Doubling 21 must give 42."
+                    "    expected: 43"
+                    "      actual: 42"
+                    "    at Array.test (tests/Shared/Doubling.fs:9:13)"
+                ]
+                "a failure keeps its message and the suite's own F# frame, without dependency or runner frames"
         }
 
-        test "should show raw output with the failing test's stack when a test run fails" {
-            let failingRun =
-                cleanRun @ [
-                    " ❯ output/Shared.Tests.js (1 test | 1 failed) 15ms"
-                    "   × Shared > should double the value when given a number 12ms"
-                    " ❯ Shared.Tests.fs:9:13"
-                    "      Tests  1 failed (1)"
-                ]
+        test "should name the test file when the file itself fails" {
+            let run = compiled @ [ report (0, 0, 0) [ file "failed" "Failed to load url ./missing.js" [] ] ]
 
-            let result = filtered filter 1 failingRun
+            let result = filtered filter 1 run
 
-            Expect.equal result failingRun "a failing test keeps its name and its .fs line"
+            Expect.equal
+                result
+                [ tally; "vitest: 0 passed (0)"; "  × tests/Shared/output/Shared.Tests.js"; "    Failed to load url ./missing.js" ]
+                "a file that fails to load is reported by its path and message"
+        }
+
+        test "should list ten failures and count the rest when more tests fail" {
+            let run = compiled @ [ report (12, 0, 0) [ file "failed" "" (List.replicate 12 failingTest) ] ]
+
+            let result = filtered filter 1 run
+
+            Expect.equal (result |> List.filter (fun line -> line.StartsWith "  × ") |> List.length) 10 "ten failures are listed"
+            Expect.equal (List.last result) "  … 2 more failures" "the failures past ten are counted"
+        }
+
+        test "should keep only the compile errors when compilation fails" {
+            let error = "./Doubling.fs(9,11): (9,12) error FSHARP: The value 'x' is not defined. (code 39)"
+            let run = [ "Started Fable compilation..."; error; "Compilation failed" ]
+
+            let result = filtered filter 1 run
+
+            Expect.equal result [ error ] "a failing compile reduces to its errors"
+        }
+
+        test "should show raw output when a failing run's report lists no failure" {
+            let run = compiled @ [ report (0, 1, 0) [ file "passed" "" [ passingTest ] ] ]
+
+            let result = filtered filter 1 run
+
+            Expect.equal result run "a failure the report does not explain is never summarised away"
+        }
+
+        test "should show raw output when a clean run wrote no report" {
+            let result = filtered filter 0 compiled
+
+            Expect.equal result compiled "a clean run without a report cannot claim its tests passed"
         }
     ]
 
 [<Tests>]
 let testsTests =
-    let filter = Filter.tests
+    let filter = Filter.tests repoRoot
 
     let expectoRun = [
         "\u001b[37m[\u001b[37m11:07:19 \u001b[37mINF\u001b[37m] \u001b[37mEXPECTO? Running tests... <Expecto>"
@@ -385,47 +471,48 @@ let testsTests =
             Expect.equal result [ "tests: ok" ] "another runner's clean run collapses to ok"
         }
 
-        test "should show raw output when the run fails" {
+        test "should keep each failing test's message and own frames when the run fails" {
             let failingRun = [
-                "[11:10:03 ERR] All.Shared.should double the value when given a number failed in 00:00:00.01."
+                "\u001b[37m[\u001b[37m09:25:32 \u001b[37mINF\u001b[37m] \u001b[37mEXPECTO? Running tests...\u001b[37m \u001b[37m<\u001b[37mExpecto\u001b[37m>\u001b[37m"
+                "\u001b[0m\u001b[37m[09:25:32 \u001b[31mERR\u001b[37m] Shared.Doubling.should double the value when given a number failed in 00:00:00.04. "
                 "Doubling 21 must give 42."
-                "   at Expecto.Expect.equal"
+                "\u001b[32mexpected\u001b[36m: 4\u001b[32m3\u001b[36m"
+                "\u001b[31m  actual\u001b[36m: 4\u001b[31m2\u001b[36m"
+                "   at Fixture.Test.Doubling.tests@8.Invoke(Unit _arg1) in /repo/tests/Shared/Doubling.fs:line 9"
+                "   at Expecto.Impl.execTestAsync@584-1.Invoke(Unit unitVar)"
+                "   at Microsoft.FSharp.Control.Trampoline.Execute(FSharpFunc`2 firstAction) in D:\\a\\async.fs:line 112 <Expecto>"
+                "\u001b[0m[09:25:32 INF] EXPECTO! 2 tests run in 00:00:00.15 for miscellaneous – 1 passed, 0 ignored, 1 failed, 0 errored. <Expecto>"
+                "\u001b[0m"
             ]
 
             let result = filtered filter 1 failingRun
 
-            Expect.equal result failingRun "a failing test keeps its name and message"
-        }
-    ]
-
-[<Tests>]
-let toLinesTests =
-    testList "toLines" [
-        test "should strip carriage returns and drop the trailing empty line when the capture is CRLF-terminated" {
-            let result = toLines "a\r\nb\r\n"
-
-            Expect.equal result [ "a"; "b" ] "a CRLF-terminated capture yields clean lines with no trailing blank"
-        }
-
-        test "should keep interior blank lines when only the final line is empty" {
-            let result = toLines "a\n\nb\n"
-
-            Expect.equal result [ "a"; ""; "b" ] "only the final empty line is dropped"
+            Expect.equal
+                result
+                [
+                    "[09:25:32 ERR] Shared.Doubling.should double the value when given a number failed in 00:00:00.04."
+                    "Doubling 21 must give 42."
+                    "expected: 43"
+                    "  actual: 42"
+                    "   at Fixture.Test.Doubling.tests@8.Invoke(Unit _arg1) in tests/Shared/Doubling.fs:line 9"
+                    "tests: 2 tests run in 00:00:00.15 for miscellaneous – 1 passed, 0 ignored, 1 failed, 0 errored."
+                ]
+                "a failing run keeps the test's name, message and own frame, without colour or framework frames"
         }
 
-        test "should keep the line when the capture has no trailing newline" {
-            let result = toLines "solo"
+        test "should keep every line of an unfamiliar runner's failure when the run fails" {
+            let failingRun = [ "Failed MyTest [12 ms]"; "  Assert.Equal() Failure" ]
 
-            Expect.equal result [ "solo" ] "a capture without a trailing newline is one line"
+            let result = filtered filter 1 failingRun
+
+            Expect.equal result failingRun "only lines known to be noise are dropped"
         }
-    ]
 
-[<Tests>]
-let runBufferedTests =
-    testList "runBuffered" [
-        test "should split and filter a raw capture when given a clean build" {
-            let result = runBuffered (Filter.dotnetBuild repoRoot) "Build succeeded\n" 0
+        test "should keep each kept line on the stream it came from when the run fails" {
+            let failingRun = [ Line.stdout "Failed MyTest [12 ms]"; { Stream = Stderr; Text = "Unhandled exception." } ]
 
-            Expect.equal result [ "dotnet build: ok" ] "a clean captured build collapses to ok"
+            let result = filter.Run failingRun 1
+
+            Expect.equal result failingRun "a stderr line stays on stderr"
         }
     ]

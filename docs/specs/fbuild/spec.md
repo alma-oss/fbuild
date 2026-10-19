@@ -543,14 +543,16 @@ No target shells out directly. Every external process goes through the
 ```fsharp
 type Command =
     | Dotnet of DotnetCommand   // Build Restore Lint Tests Pack Publish
-                                // Fable FableWatch Run WatchRun
+                                // Fable FableTests FableWatch Run WatchRun
     | Nuget of NugetCommand     // Push AddSource
     | Npm of NpmCommand         // Install Version Ls
     | Mirrord
     | Raw of cmd: string
 ```
 
-`Command.render` maps a case to an executable plus its verb; `run` executes one
+`Command.render` maps a case to an executable plus its verb — for `FableTests`,
+the whole `fable -o output -s --noRestore --run env NODE_ENV=test npx vitest
+run` line, which compiles a Fable suite and runs it once; `run` executes one
 serially and raises on a non-zero exit code, `toJob` + `runParallelWith`
 executes several concurrently. A parallel run sequences output either `Live`
 (interleaved as the processes write, the only option when a job never exits) or
@@ -560,20 +562,39 @@ have exited) or in `CompletionOrder` (each as its job exits).
 
 **RTK integration.** `RTK_ACTIVE` in the environment switches the whole layer
 on. Each command then picks a transport (`rtk err` or a direct spawn) and,
-where one exists, a `RtkFilter.Filter` that reduces the captured output:
-MSBuild diagnostics deduped and made repo-relative for
-`build`/`restore`/`pack`/`publish`, one compact `file:line:col FLxxxx message`
-per warning for `fsharplint`, a `compiled N/M in Xms` tally for Fable followed
-by Vitest's `Test Files`/`Tests` summary when `--run` ran tests, and Expecto's
-`EXPECTO! … tests run` summary for a .NET test run. Fable and test runs are
-spawned directly rather than through `rtk err`, whose errors-only reduction
-would drop a failing test's name and its `.fs` stack line; their filters strip
-ANSI colour codes, which both Fable and Expecto write to a pipe. A filter
-that keeps nothing on a clean exit collapses to a single `<command>: ok` line;
-a *failing* run whose error the filter's whitelist did not match falls back to
-the raw output, so nothing is ever summarised away when it matters. Where a
-failing run did have output suppressed, the full stdout is teed to a rotated
-log under `$TMPDIR/fake-rtk-tee/` and a `[full output: <path>]` hint appended.
+where one exists, a `RtkFilter.Filter` that reduces the captured output.
+`Rtk.arguments` adds what a command needs for its filter to parse it:
+`--reporter=json` for `FableTests`. A filtered command's stdout and stderr are
+captured together as lines tagged with their stream, in the order they arrive
+(the two pipes are read separately, so this can differ from the order they
+were written); the filter sees both, and each line it keeps is printed back to
+the stream it came from, while a line it writes itself goes to stdout. The
+filters keep:
+
+- `build`/`restore`/`pack`/`publish`: MSBuild diagnostics, deduped and made
+  repo-relative.
+- `fsharplint`: one compact `file:line:col FLxxxx message` per warning.
+- `Fable`: the compile errors and warnings, or a `compiled N/M in Xms` tally.
+- `FableTests`: the tally, then Vitest's JSON report reduced to
+  `vitest: F failed, P passed, S skipped (T)` and, per failing test (at most
+  ten, the rest counted), its `Suite > Test` name, its message, and the stack
+  frames in the suite's own F# source, paths made repo-relative. A test file
+  that fails to load is listed by its path and message. A run whose report is
+  missing, unreadable, or disagrees with the exit code is filtered as a failing
+  `Fable` compile — or shown raw, on a clean exit.
+- .NET tests: Expecto's `EXPECTO! … tests run` summary; a failing run drops
+  only Expecto's start banner, blank lines, and the stack frames inside
+  Expecto, FSharp.Core and the BCL, with paths made repo-relative.
+
+Fable and test runs are spawned directly rather than through `rtk err`, whose
+errors-only reduction would drop a failing test's name and its `.fs` stack
+line; their filters strip ANSI colour codes, which Fable, Vitest and Expecto
+write to a pipe. A filter that keeps nothing on a clean exit collapses to a
+single `<command>: ok` line; a *failing* run whose error the filter did not
+recognise falls back to the raw output, so nothing is ever summarised away when
+it matters. Where a failing run did have output suppressed, both streams are
+teed to a rotated log under `$TMPDIR/fake-rtk-tee-<user>/` and a
+`[full output: <path>]` hint appended.
 `CompactTrace` separately mutes FAKE's own dependency-graph and running-order
 chatter.
 

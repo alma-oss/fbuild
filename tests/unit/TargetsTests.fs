@@ -128,15 +128,6 @@ let fableSuitesTests =
 
             Expect.isEmpty result "A spec without Fable suites does not touch npm"
         }
-
-        test "should reset NODE_ENV to test when Fable runs Vitest" {
-            let result = FableSuites.fableArguments [ "run" ]
-
-            Expect.equal
-                result
-                [ "-o"; "output"; "-s"; "--noRestore"; "--run"; "env"; "NODE_ENV=test"; "npx"; "vitest"; "run" ]
-                "Fable compiles the restored project into output, then Vitest runs under NODE_ENV=test"
-        }
     ]
 
 [<Tests>]

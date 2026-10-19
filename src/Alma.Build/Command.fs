@@ -75,6 +75,7 @@ module internal Command =
         | Pack
         | Publish
         | Fable
+        | FableTests
         | Run
         | WatchRun
         | FableWatch
@@ -98,6 +99,11 @@ module internal Command =
 
     [<RequireQualifiedAccess>]
     module Command =
+        /// `Build` has restored every project before a suite runs. `fable --run` forces `NODE_ENV=production` on the
+        /// command it runs, and `env` resets it: under `production`, Vite reports a production build.
+        let fableVitestArguments =
+            [ "-o"; "output"; "-s"; "--noRestore"; "--run"; "env"; "NODE_ENV=test"; "npx"; "vitest" ]
+
         let private npmPath () =
             match ProcessUtils.tryFindFileOnPath "npm" with
             | Some path -> path
@@ -117,6 +123,7 @@ module internal Command =
                 | Pack -> [ "pack" ]
                 | Publish -> [ "publish" ]
                 | Fable -> [ "fable" ]
+                | FableTests -> "fable" :: fableVitestArguments @ [ "run" ]
                 | FableWatch -> [ "fable"; "watch" ]
                 | Run -> [ "run" ]
                 | WatchRun -> [ "watch"; "run" ]
@@ -149,16 +156,22 @@ module internal Command =
             | Dotnet Build -> Transport.Err, Some (Filter.dotnetBuild (Directory.GetCurrentDirectory ()))
             | Dotnet Publish -> Transport.Raw, Some (Filter.dotnetPublish (Directory.GetCurrentDirectory ()))
             | Dotnet Lint -> Transport.Raw, Some (Filter.fsharplint (Directory.GetCurrentDirectory ()))
-            | Dotnet Tests -> Transport.Raw, Some Filter.tests
+            | Dotnet Tests -> Transport.Raw, Some (Filter.tests (Directory.GetCurrentDirectory ()))
             | Dotnet Pack -> Transport.Err, Some (Filter.dotnetPack (Directory.GetCurrentDirectory ()))
             | Dotnet Restore -> Transport.Err, Some (Filter.dotnetRestore (Directory.GetCurrentDirectory ()))
             | Dotnet Fable -> Transport.Raw, Some Filter.fable
+            | Dotnet FableTests -> Transport.Raw, Some (Filter.vitest (Directory.GetCurrentDirectory ()))
             | Npm Install -> Transport.Err, None
             | Dotnet (Run | WatchRun | FableWatch) -> Transport.Raw, None
             | Npm (Version | Ls) -> Transport.Raw, None
             | Nuget _ -> Transport.Raw, None
             | Mirrord -> Transport.Raw, None
             | Command.Raw _ -> Transport.Raw, None
+
+        /// What a command needs under RTK to write output its filter can parse.
+        let arguments: Command -> string list = function
+            | Dotnet FableTests -> [ "--reporter=json" ]
+            | _ -> []
 
         let wrap (transport: Transport) (cmd: string) (args: string list): string * string list =
             match transport with
@@ -179,8 +192,9 @@ module internal Command =
         let value (ExitCode code) = code
         let isSuccess (ExitCode code) = code = 0
 
-    /// Everything a process wrote to stdout, newlines included.
-    type CapturedOutput = CapturedOutput of string
+    /// Every line a process wrote to either stream. Each stream is read on its own, so lines from
+    /// the two interleave in the order they arrived, which can differ from the order they were written.
+    type CapturedOutput = CapturedOutput of RtkFilter.Line list
 
     [<RequireQualifiedAccess>]
     module CapturedOutput =
@@ -191,7 +205,7 @@ module internal Command =
         /// Lines appear as the process writes them — the only option for one that never exits.
         | Streamed
         /// Captured, then rendered into the lines to print once the process has exited.
-        | Buffered of (CapturedOutput -> ExitCode -> string list)
+        | Buffered of (CapturedOutput -> ExitCode -> RtkFilter.Line list)
 
     type ParallelJob = {
         Name: JobName
@@ -235,12 +249,35 @@ module internal Command =
     let private wrapped (command: Command) (args: string list) (dir: string) =
         let transport, _ = plan command
         let cmd, verb = Command.render command
-        let cmd', args' = Rtk.wrap transport cmd (verb @ args)
+        let rtkArguments = if isRtkActive then Rtk.arguments command else []
+        let cmd', args' = Rtk.wrap transport cmd (verb @ args @ rtkArguments)
         spawn dir cmd' args'
+
+    let private capture (proc: CreateProcess<ProcessResult<unit>>) =
+        let lines = Collections.Concurrent.ConcurrentQueue<RtkFilter.Line> ()
+
+        let collect stream (text: string) =
+            if not (isNull text) then
+                lines.Enqueue { Stream = stream; Text = text }
+
+        let result =
+            proc
+            |> CreateProcess.redirectOutputIfNotRedirected
+            |> CreateProcess.withOutputEvents (collect RtkFilter.Stdout) (collect RtkFilter.Stderr)
+            |> Proc.run
+
+        CapturedOutput (List.ofSeq lines), ExitCode result.ExitCode
+
+    let private write (line: RtkFilter.Line) =
+        match line.Stream with
+        | RtkFilter.Stdout -> printfn "%s" line.Text
+        | RtkFilter.Stderr -> eprintfn "%s" line.Text
 
     // ---- Full-output tee ----
 
-    let private teeDir = Path.Combine (Path.GetTempPath (), "fake-rtk-tee")
+    /// Per user: the temp directory is shared, and a directory another user created is not writable.
+    let private teeDir =
+        Path.Combine (Path.GetTempPath (), sprintf "fake-rtk-tee-%s" Environment.UserName)
 
     /// Keep only the newest `keep` logs; the epoch-prefixed names sort chronological.
     let private rotateTee keep =
@@ -250,15 +287,15 @@ module internal Command =
         if excess > 0 then
             logs[.. excess - 1] |> Array.iter File.delete
 
-    /// Save full stdout to a rotated temp log, returning a `[full output: <path>]` hint; best-effort.
-    let private teeFullOutput (command: Command) (output: string): string option =
+    /// Save both streams to a rotated temp log, returning a `[full output: <path>]` hint; best-effort.
+    let private teeFullOutput (command: Command) (CapturedOutput lines): string option =
         try
             Directory.ensure teeDir
             let slug = Command.render command |> fst
             let stamp = DateTimeOffset.Now.ToUnixTimeSeconds ()
             let unique = Path.GetRandomFileName().Substring (0, 8)
             let path = teeDir </> sprintf "%d_%s_%s.log" stamp slug unique
-            File.writeString false path output
+            File.writeString false path (lines |> List.map (fun line -> line.Text + "\n") |> String.concat "")
             // Rotation is best-effort cleanup; a failure here must not void the hint we can return.
             try rotateTee 20 with _ -> ()
             Some (sprintf "[full output: %s]" path)
@@ -268,20 +305,19 @@ module internal Command =
     /// A failing run whose filter dropped meaningful lines has left the caller unable to see what
     /// actually went wrong, so its full log is worth teeing. A clean run — or a failing one whose
     /// filter kept every meaningful line — has not.
-    let internal shouldTee (exitCode: ExitCode) (CapturedOutput raw) (filtered: string list) =
+    let internal shouldTee (exitCode: ExitCode) (CapturedOutput raw) (filtered: RtkFilter.Line list) =
         let meaningful lines =
-            lines |> Seq.filter (fun (l: string) -> l.Trim () <> "") |> Seq.length
+            lines |> List.filter (fun (line: RtkFilter.Line) -> line.Text.Trim () <> "") |> List.length
 
-        not (ExitCode.isSuccess exitCode) && meaningful (raw.Split '\n') > meaningful filtered
+        not (ExitCode.isSuccess exitCode) && meaningful raw > meaningful filtered
 
     /// Lines to print for a finished buffered run: the filtered output, plus a `[full output: …]`
     /// hint when a failing run had output suppressed — the filtered lines are all the caller sees.
-    let private report (command: Command) (filter: RtkFilter.Filter) (captured: CapturedOutput) (exitCode: ExitCode): string list =
-        let (CapturedOutput raw) = captured
-        let filtered = RtkFilter.runBuffered filter raw (ExitCode.value exitCode)
+    let private report (command: Command) (filter: RtkFilter.Filter) (captured: CapturedOutput) (exitCode: ExitCode) =
+        let filtered = filter.Run (CapturedOutput.value captured) (ExitCode.value exitCode)
 
         if shouldTee exitCode captured filtered then
-            filtered @ (teeFullOutput command raw |> Option.toList)
+            filtered @ (teeFullOutput command captured |> Option.map RtkFilter.Line.stdout |> Option.toList)
         else
             filtered
 
@@ -307,13 +343,9 @@ module internal Command =
     let private exitCode (command: Command) (args: string list) (dir: string): int =
         match plan command |> outputFilter with
         | Some filter ->
-            let result = wrapped command args dir |> CreateProcess.redirectOutput |> Proc.run
-
-            report command filter (CapturedOutput result.Result.Output) (ExitCode result.ExitCode)
-            |> List.iter (printfn "%s")
-
-            eprintf "%s" result.Result.Error
-            result.ExitCode
+            let captured, code = wrapped command args dir |> capture
+            report command filter captured code |> List.iter write
+            ExitCode.value code
         | None -> (wrapped command args dir |> Proc.run).ExitCode
 
     /// Raises on a non-zero exit code.
@@ -362,30 +394,35 @@ module internal Command =
             ConsoleColor.DarkCyan
         |]
 
-        let print color (colored: string) (line: string) =
+        let print color (colored: string) (line: RtkFilter.Line) =
+            let writer =
+                match line.Stream with
+                | RtkFilter.Stdout -> Console.Out
+                | RtkFilter.Stderr -> Console.Error
+
             lock
                 locker
                 (fun () ->
                     let currentColor = Console.ForegroundColor
                     Console.ForegroundColor <- color
-                    Console.Write colored
+                    writer.Write colored
                     Console.ForegroundColor <- currentColor
-                    Console.WriteLine (JobLine.withoutCursorControl line)
+                    writer.WriteLine (JobLine.withoutCursorControl line.Text)
                 )
 
         let onStdout index (JobName name) (line: string) =
             let color = colors[index % colors.Length]
 
             if isNull line then
-                print color $"{name}: --- END ---" ""
+                print color $"{name}: --- END ---" (RtkFilter.Line.stdout "")
             else if String.isNotNullOrEmpty line then
-                print color $"{name}: " line
+                print color $"{name}: " (RtkFilter.Line.stdout line)
 
         let onStderr (JobName name) (line: string) =
             let color = ConsoleColor.Red
 
             if isNull line |> not then
-                print color $"{name}: " line
+                print color $"{name}: " { Stream = RtkFilter.Stderr; Text = line }
 
         let printStartingJob index (job: ParallelJob) =
             let color = colors[index % colors.Length]
@@ -393,7 +430,7 @@ module internal Command =
             let wd = job.Process.WorkingDirectory |> Option.defaultValue ""
             let exe = job.Process.Command.Executable
             let args = job.Process.Command.Arguments.ToStartInfo
-            print color $"{name}: {wd}> {exe} {args}" ""
+            print color $"{name}: {wd}> {exe} {args}" (RtkFilter.Line.stdout "")
 
         let printStarting indexed =
             for index, job in indexed do
@@ -422,29 +459,25 @@ module internal Command =
             for line in lines do
                 print color "" line
 
-        /// Runs a job to completion with output captured, returning its lines and stderr. A buffered
-        /// job is rendered through its report; anything else yields its raw non-empty lines.
+        /// Runs a job to completion with output captured. A buffered job is rendered through its
+        /// report; anything else yields its raw non-empty lines.
         let private runCaptured (job: ParallelJob) =
-            let result = job.Process |> CreateProcess.redirectOutput |> Proc.run
-            let code = ExitCode result.ExitCode
+            let captured, code = capture job.Process
 
             let lines =
                 match job.Output with
-                | Buffered report -> report (CapturedOutput result.Result.Output) code
-                | Streamed ->
-                    RtkFilter.toLines result.Result.Output
-                    |> List.filter String.isNotNullOrEmpty
+                | Buffered report -> report captured code
+                | Streamed -> CapturedOutput.value captured |> List.filter (fun line -> String.isNotNullOrEmpty line.Text)
 
-            (lines, result.Result.Error), code
+            lines, code
 
         /// A buffered job yields nothing until it exits, so its whole report is printed in one
         /// locked pass — otherwise a concurrent job's live lines would split the block.
         let private runBuffered index (job: ParallelJob) =
-            let (lines, error), code = runCaptured job
+            let lines, code = runCaptured job
 
             lock locker (fun () -> printBlock index job.Name lines)
 
-            eprintf "%s" error
             code
 
         let private restoreTerminalState () =
@@ -468,10 +501,9 @@ module internal Command =
                 with _ ->
                     ()
 
-        let private printGroup index job lines (error: string) =
+        let private printGroup index job lines =
             printStartingJob index job
             printLines index lines
-            eprintf "%s" error
 
         /// Every job runs to completion with its output captured, each printed as one block in
         /// `order`. Requires every job to terminate — a job that never exits stalls the whole run.
@@ -483,8 +515,8 @@ module internal Command =
             | CompletionOrder -> jobs
             |> _.WithMergeOptions(ParallelMergeOptions.NotBuffered)
             |> _.Select(fun (index, job) -> index, job, runCaptured job)
-            |> Seq.map (fun (index, job, ((lines, error), code)) ->
-                printGroup index job lines error
+            |> Seq.map (fun (index, job, (lines, code)) ->
+                printGroup index job lines
                 job.Name, code
             )
             |> Seq.toArray
