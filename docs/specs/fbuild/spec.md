@@ -122,6 +122,13 @@ run (§5.6).
 Build arguments: `no-clean` skips `Clean`; `no-lint` skips `Lint`. Default
 target when none is given is `Build`, for every spec case.
 
+`Clean` empties every `bin/Debug`, `bin/Release`, `obj/` and `.ionide/` under the
+repository root, except the root `build/`. A directory inside a
+git working tree nested below the root — a worktree such as `.worktrees/<name>`
+or a repository of its own, recognised by its `.git` file or directory — belongs
+to that tree and is left alone, so a `Clean` here cannot pull the restore output
+from under a build running there.
+
 `AssemblyInfo` and `Build` work from `Sources.Build`, which covers the
 consumer's own projects. It is not a spec field: it always derives from the
 spec's sources plus its tests, each project once, so a spec that overrides

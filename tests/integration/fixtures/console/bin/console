@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+APP="test.console"
+NET="net10.0"
+
+CONSOLE="src/bin/Debug/$NET/$APP.dll"
+if [ ! -f "$CONSOLE" ]; then
+    CONSOLE="src/bin/Release/$NET/$APP.dll"
+fi
+
+dotnet "$CONSOLE" "$@"
