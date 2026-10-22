@@ -51,6 +51,16 @@ module Targets =
                 releaseSource
             ]
 
+    [<RequireQualifiedAccess>]
+    module internal ChangeLogRelease =
+        let private isVersionNotes (line: string) =
+            line <> "## Unreleased" && not (line.StartsWith "###")
+
+        /// The latest released version in the `CHANGELOG.md` lines, or `None` when they hold no parsable release.
+        let parse (lines: seq<string>) =
+            try lines |> Seq.filter isVersionNotes |> ReleaseNotes.parse |> Some
+            with _ -> None
+
     // --------------------------------------------------------------------------------------------------------
     // 2. Targets for FAKE
     // --------------------------------------------------------------------------------------------------------
@@ -211,10 +221,7 @@ module Targets =
 
                 let release =
                     definition.ChangeLog
-                    |> Option.bind (fun changeLog ->
-                        try ReleaseNotes.parse (File.ReadAllLines changeLog |> Seq.filter ((<>) "## Unreleased")) |> Some
-                        with _ -> None
-                    )
+                    |> Option.bind (File.ReadAllLines >> ChangeLogRelease.parse)
 
                 let gitValue fallbackEnvironmentVariableNames initialValue =
                     initialValue

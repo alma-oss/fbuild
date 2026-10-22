@@ -79,3 +79,74 @@ let commandArgumentsTests =
                 "Mirrord should pass the runtime ID to Run and Watch"
         }
     ]
+
+[<Tests>]
+let changeLogReleaseTests =
+    let parseVersion lines =
+        lines
+        |> ChangeLogRelease.parse
+        |> Option.map (fun release -> release.AssemblyVersion)
+
+    testList "ChangeLogRelease" [
+        test "should read the latest released version" {
+            let result =
+                parseVersion [
+                    "# Changelog"
+                    ""
+                    "## 1.2.3 - 2026-10-14"
+                    "- Fix something"
+                    ""
+                    "## 1.2.2 - 2026-10-01"
+                    "- Add something"
+                ]
+
+            Expect.equal result (Some "1.2.3") "Version should come from the topmost release"
+        }
+
+        test "should skip the Unreleased section header" {
+            let result =
+                parseVersion [
+                    "# Changelog"
+                    "## Unreleased"
+                    "- Pending change"
+                    ""
+                    "## 1.2.3 - 2026-10-14"
+                    "- Fix something"
+                ]
+
+            Expect.equal result (Some "1.2.3") "Unreleased should not be taken for a version"
+        }
+
+        test "should skip subsection headers" {
+            let result =
+                parseVersion [
+                    "# Changelog"
+                    "## Unreleased"
+                    "### Add"
+                    "- Pending change"
+                    ""
+                    "## 1.2.3 - 2026-10-14"
+                    "### Fix"
+                    "- Fix something"
+                    "### Changed"
+                    "- Change something"
+                ]
+
+            Expect.equal result (Some "1.2.3") "Subsection headers should not break version parsing"
+        }
+
+        test "should give no release when the change log holds none" {
+            let result =
+                parseVersion [
+                    "# Changelog"
+                    "## Unreleased"
+                    "- Pending change"
+                ]
+
+            Expect.isNone result "A change log without a release should have no version"
+        }
+
+        test "should give no release for empty change log" {
+            Expect.isNone (parseVersion []) "An empty change log should have no version"
+        }
+    ]
