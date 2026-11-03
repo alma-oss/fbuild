@@ -2,6 +2,7 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- `AssemblyInfo` ignores `###` subsection headers (`### Fix`, `### Add`, …) in `CHANGELOG.md` when reading the release version; previously any such line made the version fall back to `1.0`
 
 ## 3.1.0 - 2026-10-14
 - Fix `RaspberryPiHassioAddon` to use real framework target `linux-musl-arm64`
