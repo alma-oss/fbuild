@@ -98,9 +98,10 @@ let withServer (workDir: string) (assembly: string) (useServer: string -> unit) 
 // ---- Fixture preparation ----
 
 /// Build artifacts a previous local run may have left in the checked-in fixture. Copying them
-/// into the working copy would let a stale `bin/` satisfy a target that should have rebuilt it.
+/// into the working copy would let stale build outputs satisfy a target that should have rebuilt
+/// them. `bin` itself is copied so a checked-in `bin/console` launcher reaches the copy.
 let private ignored =
-    set [ "bin"; "obj"; "node_modules"; "deploy"; "output"; "release"; "dist"; "app"; ".git" ]
+    set [ "Debug"; "Release"; "obj"; "node_modules"; "deploy"; "output"; "release"; "dist"; "app"; ".git" ]
 
 [<TailCall>]
 let rec private copyAll pending =

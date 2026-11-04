@@ -141,6 +141,17 @@ let integrationTests =
             "should build every project for the runtime without a solution"
             assertConsoleBuiltForRuntime
 
+        editedFixtureTest
+            Console
+            (fun dir ->
+                Directory.CreateDirectory (Path.Combine (dir, "bin", "Debug")) |> ignore
+                File.WriteAllText (Path.Combine (dir, "bin", "Debug", "stale.dll"), ""))
+            "Clean"
+            "should keep the bin/console launcher when a console application is cleaned"
+            (fun dir ->
+                Expect.isFalse (fileExists dir "bin/Debug/stale.dll") "Clean should empty the root build output beside the launcher"
+                Expect.isTrue (fileExists dir "bin/console") "Clean should leave the bin/console launcher in place")
+
         fixtureTest Console "Bootstrap" "should deploy the runtime props when a console application is bootstrapped" (fun dir ->
             Expect.isTrue
                 (fileExists dir "Directory.Build.props")
