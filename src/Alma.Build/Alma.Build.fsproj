@@ -26,6 +26,7 @@
         <Compile Include="Utils.fs" />
         <Compile Include="DotnetTools.fs" />
         <Compile Include="Bootstrap.fs" />
+        <Compile Include="ChangeLog.fs" />
         <Compile Include="Targets.fs" />
     </ItemGroup>
 

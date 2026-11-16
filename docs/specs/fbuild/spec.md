@@ -102,7 +102,8 @@ Consumer-repo command surface is one script:
 
 Targets are defined in `src/Alma.Build/Targets.fs`. Shared targets: `Info`,
 `Bootstrap`, `Solution`, `Clean`, `AssemblyInfo`, `Build`, `Lint`, `Tests`,
-`Release`, `Publish`, `ZipRelease`, `Run`, `Watch`, `RunMirrord`, `WatchMirrord`.
+`Release`, `Publish`, `ZipRelease`, `ReleaseNotes`, `Run`, `Watch`, `RunMirrord`,
+`WatchMirrord`.
 
 `Bootstrap` sits outside every chain: run explicitly, it extracts the support
 files bundled in the engine assembly into the working directory and writes the
@@ -111,6 +112,10 @@ files that follow from the project spec (§5.4).
 `Solution` also sits outside every chain: run explicitly, it generates the
 repo's `.slnx` from the project's declared sources, overwriting it on every
 run (§5.6).
+
+`ReleaseNotes` sits outside every chain too: run explicitly, it writes the
+notes of the latest release in `CHANGELOG.md` to a file for a release
+workflow (§5.8).
 
 | Spec | Chain |
 | --- | --- |
@@ -121,6 +126,10 @@ run (§5.6).
 
 Build arguments: `no-clean` skips `Clean`; `no-lint` skips `Lint`. Default
 target when none is given is `Build`, for every spec case.
+
+`Release` and a `Publish` that pushes a package first check the release
+version against `CHANGELOG.md` and, on a tag build, the tag being built;
+`Executable` `Release` checks only on a tag build (§5.7).
 
 `Clean` empties every `bin/Debug`, `bin/Release`, `obj/` and `.ionide/` under the
 repository root, except the root `build/`. A directory inside a
@@ -184,6 +193,7 @@ src/Alma.Build/         # ENGINE — packed as the Alma.Build NuGet
   DotnetTools.fs        #   tool pins + `.config/dotnet-tools.json` rendering (§5.4)
   Bootstrap.fs          #   internal — bundled-resource extraction, the deployed
                         #   file table, and the Bootstrap deployment (§5.4)
+  ChangeLog.fs          #   internal — latest change-log release, release notes, release guard
   Targets.fs            #   the FAKE target graph for every project type
   runtime/              #   embedded, deployed per spec (§5.4)
     Directory.Build.props #  carries the RID into each project (§5.3)
@@ -255,7 +265,7 @@ is mandatory across all build projects — there is no Paket-free variant.
 ### 5.2 Engine package — `Alma.Build`
 
 - Compiled engine (`RtkFilter.fs`, `Command.fs`, `Utils.fs`, `DotnetTools.fs`,
-  `Bootstrap.fs`, `Targets.fs`).
+  `Bootstrap.fs`, `ChangeLog.fs`, `Targets.fs`).
 - **Also carries the non-compiled assets** as embedded resources — the fsproj
   globs `bootstrap/**` with logical names that keep the relative path. The
   `Bootstrap` target extracts them into the consuming repo, which makes them
@@ -282,6 +292,15 @@ is mandatory across all build projects — there is no Paket-free variant.
 
 Every case implements `IProjectSources` (`Sources` / `Tests` / `Build` globs) and
 each has a `Spec.map*` function for overriding fields from `Build.fs`.
+
+`Library.Changelog` is a path. `Executable`, `ConsoleApplication` and
+`SAFEStackApplication` take `Changelog: ChangeLogSource = Auto | At of path |
+NoChangeLog`, `Auto` by default; the spec records the intent only.
+`ProjectSpec.ChangeLog` (and `ProjectDefinition.ChangeLog`) resolves it to a
+`string option` when a target reads it: a library's path or `At path` as
+given, `NoChangeLog` as none, and `Auto` as `CHANGELOG.md` when that file
+exists in the working directory, otherwise none. A missing `At` file fails
+the target that reads it.
 
 `NugetApi = NotUsed | AskForKey | Organization of name | KeyInEnvironment of
 envVarName` drives the `Publish` target. The consumer-facing `RuntimeTarget` is
@@ -462,6 +481,146 @@ hand-authoring it.
 Out of scope: preserving manual `<Folder>` reshuffling or other hand edits
 across a regeneration — a rerun always replaces the file's content wholesale.
 
+### 5.7 Release version guard
+
+`CHANGELOG.md` is the version source for `AssemblyInfo`, and the guard checks
+the same version against the release being cut, so a tag and the change log
+cannot disagree in what gets released.
+
+**Reading the change log.** The internal `ChangeLogRelease` module is the one
+change-log reader; `AssemblyInfo`, the guard and `ReleaseNotes` (§5.8) all go
+through it. It reads the change log the spec resolves to (§5.3) and returns the
+latest release section — FAKE's `ReleaseNotes` plus the raw body — or a
+`ChangeLogError` whose `format` names the path. It never throws.
+
+- The *latest release section* starts at the topmost `## ` heading other than
+  a line that is exactly `## Unreleased` (`## [Unreleased]` is a release
+  heading) and runs up to the next `## ` heading or the end of the file;
+  `###` lines are subsections inside it.
+- FAKE parses only that heading line, so neither the body nor text above the
+  heading (a `# Changelog` title, a `<!-- -->` comment) affects the version.
+
+`AssemblyInfo` stamps the parsed version, or `1.0` when the spec has no change
+log, or the change log holds no release section or an unparsable latest
+heading, so non-release targets work before a first release. A named change
+log that is missing or unreadable fails `AssemblyInfo` with the read error.
+
+**Checks.** Where the guard applies, it runs first in the target, before any
+pack, publish, move, zip, key prompt (`AskForKey`'s "is it tagged yet?") or
+push:
+
+- the *release check* fails when the change log yields no release: missing or
+  unreadable file, no release section, or an unparsable latest heading;
+- the *tag check*, on a tag run only, fails when the latest release differs
+  from the tag, or with the release-check message when there is no release;
+- the *project version check*, on a tag run only, fails when the main
+  project's evaluated MSBuild `Version` differs from the tag.
+
+| Target and spec | Non-tag run | Tag run |
+| --- | --- | --- |
+| `Release` — `Library`, `ConsoleApplication` | release | release, tag, project version |
+| `Release` — `Executable` | none | release, tag |
+| `Publish` — `Library` with `NugetApi` other than `NotUsed` | release | release, tag |
+| any other `Publish`; `SAFEStackApplication` | none | none |
+
+A spec whose change log resolves to none (§5.3) is never guarded. Non-tag
+`Executable` `Release` is unguarded because service Dockerfiles run
+`./build.sh -t Release no-clean` on every image build, where a change log
+holding only `## Unreleased` is normal. No build argument or environment
+variable skips the guard, and a release is never cut under the `1.0`
+fallback.
+
+**Tag run.** A build is a *tag run* when `GITHUB_REF_TYPE` is exactly `tag`;
+the tag is `GITHUB_REF_NAME`, empty when unset. The tag must be exactly
+`MAJOR.MINOR.PATCH` with an optional `-prerelease` of dot-separated
+`[0-9A-Za-z-]+` identifiers, and is compared by SemVer equality with the
+latest release, prerelease included. A heading with fewer than three numeric
+parts is zero-padded, so `## 1.2` equals tag `1.2.0`; `1.2.3-beta.1` equals
+neither `1.2.3` nor `1.2.3-beta.2`. Any other tag fails the check: a `v`
+prefix, leading zeros (`01.2.3`), `+build` metadata, two parts (`1.2`), an
+empty name. The message names the tag, the change-log version and the path.
+
+**Project version check.** The package version comes from the project's
+MSBuild `Version`, not from `CHANGELOG.md`, so a tag-run `Release` reads it
+with `dotnet msbuild <project> -getProperty:Version` (`Directory.Build.props`
+included) after the change-log checks. The project is `ReleaseSource` for a
+`ConsoleApplication`; for a `Library` it is `src/<Project.Name>` when that
+directory exists, else the single `./*.fsproj`, else the repository root. The
+message names the tag, the `Version` and the project path and says to set
+`<Version>`. An unset `<Version>` evaluates to `1.0.0`. Non-tag runs never
+read it, so a local `publish-local` with a preview `Version` keeps working.
+
+**Integration harness.** Fixture builds run with `GITHUB_REF_TYPE` and
+`GITHUB_REF_NAME` removed, so the engine's own tag build never checks a
+fixture's change log; a guard scenario sets them explicitly.
+
+Acceptance criteria:
+
+- **AC-RVG-1** — Tag run whose tag equals the latest release (`1.2.3` / `## 1.2.3`,
+  `1.2.0` / `## 1.2`, `1.2.3-beta.1` / `## 1.2.3-beta.1`) and the project
+  `Version`: every guarded target proceeds as without the guard.
+- **AC-RVG-2** — Tag run whose tag differs (`1.3.0` against `## 1.2.0` under a
+  filled `## Unreleased`; `1.2.3` against `## 1.2.3-beta.1`; `release-1`):
+  `Release` fails for `Library`, `ConsoleApplication` and `Executable`, and a
+  pushing `Publish` fails even without a `Release` in the run, before anything
+  is packed, published, cleaned, moved, prompted or pushed.
+- **AC-RVG-3** — A change log that is missing or holds only `## Unreleased`
+  fails each guarded target per the table, naming the path; with only
+  `## Unreleased`, `AssemblyInfo` still stamps `1.0`, and with a missing
+  named file it fails too.
+- **AC-RVG-4** — Non-tag `Executable` `Release` with only `## Unreleased`
+  succeeds and populates the release directory (integration case on the
+  `executable` fixture).
+- **AC-RVG-5** — Unguarded cases (table rows marked none, and a change log
+  resolving to none) behave as without the guard, whatever the change log holds.
+- **AC-RVG-6** — Tag run whose change log matches but whose project `Version`
+  differs (an unset `<Version>` included): `Release` fails before anything is
+  cleaned, packed or published.
+- **AC-RVG-7** — The guard decision, `ChangeLogRelease.parse` (each error case
+  as an `Error`) and the project version comparison are unit-tested in
+  `ChangeLogTests` with no filesystem or process.
+- **AC-RVG-8** — The integration suite passes in a tag-triggered job; one
+  scenario drives a fixture `Release` on a mismatched tag and asserts the
+  failure and an empty `release/`.
+- **AC-RVG-9** — The repo `CHANGELOG.md` records the consumer-facing change;
+  `CONTRIBUTING.md` and §6 say a `## X.Y.Z` section goes below
+  `## Unreleased` before tagging.
+
+### 5.8 Release notes
+
+A GitHub release workflow passes the notes of the version it releases to
+`gh release create --notes-file <file>`. The `ReleaseNotes` target produces
+that file from `CHANGELOG.md`, so no consumer parses its change log itself.
+
+- Defined for every `ProjectSpec` case and outside every target chain, like
+  `Bootstrap` and `Solution`; it depends on no other target, so a workflow
+  runs `./build.sh ReleaseNotes` on its own.
+- Writes the body of the latest release section (§5.7) to
+  `release/RELEASE_NOTES.md` under the repository root, whatever the spec's
+  `ReleaseDir`, and traces the path. The heading line is left out and blank
+  edge lines are dropped; every other line, link definitions and `###`
+  subsections included, is kept as it stands. `## Unreleased` and older
+  releases are left out.
+- Deletes any previous notes file first, then fails without writing when the
+  spec has no change log, the change log yields no release (§5.7), the body
+  is empty, or on a tag run the release differs from the tag. Each message
+  says which and names the path where there is one.
+
+Acceptance criteria:
+
+- **AC-RN-1** — Given `## Unreleased`, `## 1.2.3 - <date>` and
+  `## 1.2.2 - <date>`, the file holds exactly the 1.2.3 body without its
+  heading or blank edge lines; nested lists, `###` headers, links, inline code
+  and trailing link definitions come through unchanged; without
+  `## Unreleased` the topmost section is used the same way.
+- **AC-RN-2** — Every failure case above fails the target and leaves no notes
+  file, a previous one included.
+- **AC-RN-3** — The target runs without pulling any chain target, no chain
+  target pulls it, and it exists for every `ProjectSpec` case.
+- **AC-RN-4** — AC-RN-1 and AC-RN-2 are unit-tested on the parser and notes
+  content; one integration case drives the target on a fixture, over an
+  existing file, and asserts the written file.
+
 ## 6. Workflows
 
 **New repo:** follow the adoption section in `README.md` — pin the package, add `build/`, run
@@ -479,9 +638,10 @@ vendor the engine source.
 project directly, so engine edits reach the self-host build on the next run with
 nothing to repack. Then run the suites that cover what changed (§8).
 
-**Release:** bump `Version` in `Alma.Build.fsproj` and `CHANGELOG.md`, merge,
-then push a `X.Y.Z` tag — `publish.yaml` packs and pushes to nuget.org from
-there.
+**Release:** bump `Version` in `Alma.Build.fsproj`, add a `## X.Y.Z` section
+below `## Unreleased` in `CHANGELOG.md`, merge, then push a `X.Y.Z` tag —
+`publish.yaml` packs and pushes to nuget.org from there. The release version
+guard (§5.7) fails the tag build when either disagrees with the tag.
 
 ## 7. Code style
 
@@ -528,7 +688,7 @@ Conventions in force:
 - `orFail`/`failwith` are used deliberately in the build engine, where a failure
   must abort the build and no caller can handle an error.
 - Compile order is explicit in the `.fsproj` and is part of the design:
-  `RtkFilter → Command → Utils → DotnetTools → Bootstrap → Targets`. `RtkFilter`,
+  `RtkFilter → Command → Utils → DotnetTools → Bootstrap → ChangeLog → Targets`. `RtkFilter`,
   `Command`, and most of `Bootstrap` are
   `internal`; the unit test assembly reaches them through
   `InternalsVisibleTo("Alma.Build.Tests")` on the engine project.
@@ -544,8 +704,9 @@ on: the output filters (`RtkFilterTests`), the command vocabulary, transport
 selection, tee decision and trace compaction (`CommandTests`), runtime resolution
 and solution rendering (`UtilsTests`), the tool pins and manifest rendering
 (`DotnetToolsTests`), the
-deployed-file table (`BootstrapTests`), and runtime command construction
-(`TargetsTests`). Fast, spawns no processes.
+deployed-file table (`BootstrapTests`), runtime command construction
+(`TargetsTests`), and change-log reading and the release version guard decision
+(`ChangeLogTests`). Fast, spawns no processes.
 
 **Integration — `tests/integration/`.** One or more independent cases exercise each
 `ProjectSpec` shape. Each case copies its checked-in fixture repo out of
@@ -567,6 +728,7 @@ give every fixture copy isolated engine `bin`/`obj` paths, so cases can run conc
 | `library` | `Release` | a `.nupkg` in `release/` |
 | `library-root` | `Release` | a `.nupkg` in `release/` when the project shares the root with a solution |
 | `executable` | `Release` | `app/test.executable.dll` |
+| `executable`, change log only `## Unreleased` | `Release` | `app/test.executable.dll`, `1.0` stamped |
 | `console` | `Release` | Linux x64 and macOS x64/arm64 archives, each holding the single-file executable |
 | `console` | `Build` | every project of the solution built under its runtime, nothing in the runtime-agnostic output |
 | `console`, solution deleted | `Build` | the same, with `Build` fanning out per project directory |
@@ -576,6 +738,8 @@ give every fixture copy isolated engine `bin`/`obj` paths, so cases can run conc
 | `library`, stale `.slnx` | `Solution` | stale `<Project.Name>.slnx` overwritten with fresh content |
 | `library-root` | `Solution` | differently named checked-in solution left alone; own `.slnx` generated alongside it |
 | `library` | `Solution` run twice | second run regenerates identical content, no second file |
+| `library`, stale `release/RELEASE_NOTES.md` | `ReleaseNotes` | `release/RELEASE_NOTES.md` replaced with the latest release body |
+| `library`, mismatched tag | `Release` | the target fails, naming tag, version and path, with no `.nupkg` in `release/` |
 | `safe` | `Bundle` | a server `.dll` in `deploy/`, an `.html` in `deploy/public/` |
 | `safe` | `Bundle` | the published server, started on a free port, echoes a record of a single-case DU, a union with fields, options, `int64`, `decimal`, list, `Map`, tuple and `Result` back to the Fable-compiled `Fable.Remoting.Client` proxy run under Node; the server and the client each compare it to the shared sample |
 
@@ -614,8 +778,8 @@ cross-publish macOS artifacts, but hosted macOS execution depends on local runs.
 
 - Keep `Alma.Build.fsproj` `Version`, `CHANGELOG.md`, and
   `paket.dependencies` consistent in the same change.
-- Run the integration tests after changing `Targets.fs` or `Bootstrap.fs` — the
-  unit suite does not execute a single target.
+- Run the integration tests after changing `Targets.fs`, `ChangeLog.fs` or
+  `Bootstrap.fs` — the unit suite does not execute a single target.
 - Run the `packaged engine` filtered case after changing packaging, the
   package `Version`, or the bootstrap assets.
 - Edit the bootstrap assets under `bootstrap/`; they are the single source

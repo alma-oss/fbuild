@@ -40,6 +40,31 @@ and test projects plus `build/build.fsproj`, which the IDE loads but `Build` doe
 compile, overwriting it on every run — like `Bootstrap`, rerun it whenever
 the project's structure changes.
 
+`ReleaseNotes` sits outside the chain too. It writes the body of the latest release in
+`CHANGELOG.md` to `release/RELEASE_NOTES.md` for a release workflow. On a tag build it fails
+when the tag differs from that release:
+
+```bash
+./build.sh ReleaseNotes
+gh release create "$TAG" --notes-file release/RELEASE_NOTES.md
+```
+
+`Release`, and a `Publish` that pushes a package, first check the release version in
+`CHANGELOG.md`:
+
+- In a `Library` or `ConsoleApplication`, they fail when the change log holds no release
+  section — only `## Unreleased`, or no `## <version>` heading at all.
+- On a tag build (`GITHUB_REF_TYPE=tag`), they fail when the topmost release differs from the
+  tag, which is the bare version (`1.2.3`, not `v1.2.3`). This applies to every spec with a
+  change log, `Executable` included, so add a `## X.Y.Z` section below `## Unreleased` before
+  pushing the `X.Y.Z` tag. A tag must be exactly `MAJOR.MINOR.PATCH` with an optional
+  `-prerelease`.
+- On a tag build, `Release` in a `Library` or `ConsoleApplication` also fails when the
+  project's `<Version>` (as MSBuild evaluates it, `Directory.Build.props` included) differs from
+  the tag, so set `<Version>` to the tag's version before tagging.
+- An `Executable` `Release` outside a tag build is not checked, and a spec with no change log
+  (`NoChangeLog`, or `Auto` without a `CHANGELOG.md`) is never checked.
+
 Arguments:
 
 - `no-clean`: skips the `Clean` step.
@@ -202,6 +227,19 @@ independent of the release matrix. `Release` always publishes every target in
 `RuntimeTargets`; `PublishSingleFile = false` keeps the published files separate.
 
 Use `Custom "linux-musl-arm64"` for a RID without a predefined `RuntimeTarget` case.
+
+### Change log
+
+A library always reads `Changelog` (default `"CHANGELOG.md"`). `Executable`,
+`ConsoleApplication`, and `SAFEStackApplication` specs take a `ChangeLogSource`:
+`Auto` (the default) uses `CHANGELOG.md` when it exists at the repo root, `At "path"`
+requires the named file, and `NoChangeLog` uses none:
+
+```fsharp
+Specs =
+    Spec.defaultExecutable
+    |> Spec.mapExecutable (fun spec -> { spec with Changelog = ChangeLogSource.At "docs/CHANGELOG.md" })
+```
 
 ## Updating
 

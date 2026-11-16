@@ -109,10 +109,47 @@ let integrationTests =
                 "Rerunning Solution regenerates the same content rather than corrupting or duplicating it"
             Expect.equal (Directory.GetFiles(dir, "*.slnx").Length) 1 "Rerunning Solution does not create a second file")
 
+        editedFixtureTest
+            Library
+            (fun dir ->
+                Directory.CreateDirectory (Path.Combine (dir, "release")) |> ignore
+                File.WriteAllText (Path.Combine (dir, "release", "RELEASE_NOTES.md"), "stale notes"))
+            "ReleaseNotes"
+            "should replace stale release notes with the latest release body"
+            (fun dir ->
+                Expect.equal
+                    (File.ReadAllText (Path.Combine (dir, "release", "RELEASE_NOTES.md")))
+                    "- Initial fixture release.\n"
+                    "ReleaseNotes should overwrite the file with the body of ## 1.0.0, without its heading")
+
         fixtureTest Executable "Release" "should publish the executable when an executable application is released" (fun dir ->
             Expect.isTrue
                 (fileExists dir "app/test.executable.dll")
                 "Release should publish the executable into app/")
+
+        editedFixtureTest
+            Executable
+            (fun dir -> File.WriteAllText (Path.Combine (dir, "CHANGELOG.md"), "## Unreleased\n\n- Pending change.\n"))
+            "Release"
+            "should release an executable whose change log holds only Unreleased outside a tag build"
+            (fun dir ->
+                Expect.isTrue (fileExists dir "app/test.executable.dll") "Release should still publish the executable into app/"
+                Expect.stringContains
+                    (File.ReadAllText (Path.Combine (dir, "AssemblyInfo.fs")))
+                    "AssemblyVersionAttribute(\"1.0\")"
+                    "AssemblyInfo should stamp the 1.0 fallback")
+
+        testCase "should fail a library release whose change log does not match the tag" <| fun () ->
+            withFailingEditedFixtureIn
+                [ "GITHUB_REF_TYPE", "tag"; "GITHUB_REF_NAME", "9.9.9" ]
+                Library
+                ignore
+                "Release no-lint"
+                (fun code output dir ->
+                    Expect.notEqual code 0 "A tag that differs from the latest release should fail Release"
+                    [ "9.9.9"; "1.0.0"; "CHANGELOG.md" ]
+                    |> List.iter (fun part -> Expect.stringContains output part "The failure should name the tag, the change-log version and the path")
+                    Expect.isFalse (anyFile dir "release" "*.nupkg") "Nothing should be packed into release/")
 
         fixtureTest Console "Release" "should archive every configured runtime when a console application is released" (fun dir ->
             consoleRuntimeIdentifiers

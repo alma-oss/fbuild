@@ -398,12 +398,7 @@ module Utils =
                     | { Specs = ConsoleApplication app } -> app :> IProjectSources
                     | { Specs = SAFEStackApplication app } -> app  :> IProjectSources
 
-                member this.ChangeLog =
-                    match this with
-                    | { Specs = Library { Changelog = changeLog } } -> Some changeLog
-                    | { Specs = Executable { Changelog = changeLog } }
-                    | { Specs = ConsoleApplication { Changelog = changeLog } }
-                    | { Specs = SAFEStackApplication { Changelog = changeLog } } -> changeLog
+                member this.ChangeLog = this.Specs.ChangeLog
 
         and ProjectMeta = {
             Name: string
@@ -435,6 +430,14 @@ module Utils =
                     match this with
                     | SAFEStackApplication _ -> true
                     | _ -> false
+
+                /// The change log path, resolved when read: `Auto` checks for `CHANGELOG.md` in the working directory.
+                member this.ChangeLog =
+                    match this with
+                    | Library { Changelog = changeLog } -> Some changeLog
+                    | Executable { Changelog = changeLog }
+                    | ConsoleApplication { Changelog = changeLog }
+                    | SAFEStackApplication { Changelog = changeLog } -> ChangeLogSource.Resolve File.Exists changeLog
 
                 member this.RuntimeConfiguration =
                     match this with
@@ -471,9 +474,23 @@ module Utils =
             | Organization of name: string
             | KeyInEnvironment of string
 
+        /// The change log of a non-library spec.
+        and [<RequireQualifiedAccess>] ChangeLogSource =
+            /// `CHANGELOG.md` when it exists at the repository root, otherwise none.
+            | Auto
+            /// A required change log; a missing file fails the target that reads it.
+            | At of path: string
+            | NoChangeLog
+
+            static member internal Resolve (fileExists: string -> bool) (source: ChangeLogSource) =
+                match source with
+                | ChangeLogSource.Auto -> if fileExists "CHANGELOG.md" then Some "CHANGELOG.md" else None
+                | ChangeLogSource.At path -> Some path
+                | ChangeLogSource.NoChangeLog -> None
+
         and ExecutableSpec =
             {
-                Changelog: string option
+                Changelog: ChangeLogSource
                 ReleaseDir: string
                 ApplicationSources: IGlobbingPattern
                 TestsSources: IGlobbingPattern
@@ -485,7 +502,7 @@ module Utils =
 
         and ConsoleApplicationSpec =
             {
-                Changelog: string option
+                Changelog: ChangeLogSource
                 ReleaseDir: string
                 RuntimeTargets: RuntimeTarget list
                 RuntimeMode: RuntimeMode
@@ -501,7 +518,7 @@ module Utils =
 
         and SAFEStackApplicationSpec =
             {
-                Changelog: string option
+                Changelog: ChangeLogSource
                 TemplateVersion: string
 
                 SharedPath: string
@@ -555,7 +572,7 @@ module Utils =
                     ++ "src/**/*.fsproj"
 
                 Executable {
-                    Changelog = if File.Exists "CHANGELOG.md" then Some "CHANGELOG.md" else None
+                    Changelog = ChangeLogSource.Auto
                     ReleaseDir = "/app"
 
                     ApplicationSources = release
@@ -569,7 +586,7 @@ module Utils =
                     ++ "src/**/*.fsproj"
 
                 ConsoleApplication {
-                    Changelog = if File.Exists "CHANGELOG.md" then Some "CHANGELOG.md" else None
+                    Changelog = ChangeLogSource.Auto
                     ReleaseDir = "./dist"
                     RuntimeTargets = runtimeTargets
                     RuntimeMode = RuntimeMode.Portable
@@ -584,7 +601,7 @@ module Utils =
                 let release = !! "src/**/*.fsproj"
 
                 SAFEStackApplication {
-                    Changelog = if File.Exists "CHANGELOG.md" then Some "CHANGELOG.md" else None
+                    Changelog = ChangeLogSource.Auto
                     TemplateVersion = templateVersion
 
                     SharedPath = Path.getFullName ("src" </> "Shared")

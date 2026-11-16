@@ -14,6 +14,7 @@ module Targets =
     open Command
     open Utils
     open Bootstrap
+    open ChangeLog
     open Github.Types
 
     [<RequireQualifiedAccess>]
@@ -50,16 +51,6 @@ module Targets =
                 "-r"; runtimeIdentifier
                 releaseSource
             ]
-
-    [<RequireQualifiedAccess>]
-    module internal ChangeLogRelease =
-        let private isVersionNotes (line: string) =
-            line <> "## Unreleased" && not (line.StartsWith "###")
-
-        /// The latest released version in the `CHANGELOG.md` lines, or `None` when they hold no parsable release.
-        let parse (lines: seq<string>) =
-            try lines |> Seq.filter isVersionNotes |> ReleaseNotes.parse |> Some
-            with _ -> None
 
     [<RequireQualifiedAccess>]
     module internal Clean =
@@ -187,6 +178,26 @@ module Targets =
         let runMirrord command arguments =
             runInRoot Mirrord (CommandArguments.mirrordExecArguments buildRuntimeIdentifier command arguments)
 
+        let tag = TagName.ofEnvironment (envVar "GITHUB_REF_TYPE") (envVar "GITHUB_REF_NAME")
+
+        let guardRelease changeLog =
+            match changeLog |> Option.map (ChangeLogRelease.read tag) with
+            | Some (Error error) -> error |> ChangeLogError.format |> failwith
+            | _ -> ()
+
+        let guardProjectVersion tag project =
+            let result =
+                CreateProcess.fromRawCommand "dotnet" [ "msbuild"; project; "-getProperty:Version" ]
+                |> CreateProcess.redirectOutput
+                |> Proc.run
+
+            if result.ExitCode <> 0 then
+                failwithf "Reading Version of project %s failed:\n%s%s" project result.Result.Output result.Result.Error
+
+            match ChangeLogRelease.checkProjectVersion tag project (result.Result.Output.Trim ()) with
+            | Error error -> error |> ChangeLogError.format |> failwith
+            | Ok () -> ()
+
         Target.create "Info" (fun _ ->
             let separator sign = Trace.traceFAKE "%s" (String.replicate 69 sign)
 
@@ -229,6 +240,22 @@ module Targets =
             | Error error -> error |> SolutionFileNameError.format |> failwith
         )
 
+        Target.create "ReleaseNotes" (fun _ ->
+            File.delete ReleaseNotesFile.path
+
+            let notes =
+                match definition.ChangeLog with
+                | Some changeLog -> changeLog |> ChangeLogRelease.read tag |> ReleaseNotesFile.content changeLog
+                | None -> Error ReleaseNotesError.NoChangeLog
+
+            match notes with
+            | Ok notes ->
+                Directory.ensure (Path.getDirectory ReleaseNotesFile.path)
+                File.WriteAllText (ReleaseNotesFile.path, notes)
+                Trace.tracefn "Release notes written to %s" ReleaseNotesFile.path
+            | Error error -> error |> ReleaseNotesError.format |> failwith
+        )
+
         Target.create "Clean" <| skipOn "no-clean" (fun _ ->
             !! "./**/bin/Release"
             ++ "./**/bin/Debug"
@@ -240,12 +267,14 @@ module Targets =
         )
 
         Target.create "AssemblyInfo" (fun _ ->
+            let version =
+                match definition.ChangeLog |> Option.map (ChangeLogRelease.read None >> ChangeLogRelease.assemblyVersion) with
+                | Some (Ok version) -> version
+                | Some (Error error) -> error |> ChangeLogError.format |> failwith
+                | None -> "1.0"
+
             let getAssemblyInfoAttributes projectName =
                 let now = DateTime.Now
-
-                let release =
-                    definition.ChangeLog
-                    |> Option.bind (File.ReadAllLines >> ChangeLogRelease.parse)
 
                 let gitValue fallbackEnvironmentVariableNames initialValue =
                     initialValue
@@ -259,13 +288,8 @@ module Targets =
                     AssemblyInfo.Product definition.Project.Name
                     AssemblyInfo.Description definition.Project.Summary
 
-                    match release with
-                    | Some release ->
-                        AssemblyInfo.Version release.AssemblyVersion
-                        AssemblyInfo.FileVersion release.AssemblyVersion
-                    | _ ->
-                        AssemblyInfo.Version "1.0"
-                        AssemblyInfo.FileVersion "1.0"
+                    AssemblyInfo.Version version
+                    AssemblyInfo.FileVersion version
 
                     AssemblyInfo.InternalsVisibleTo "tests"
 
@@ -360,6 +384,22 @@ module Targets =
                 )
 
             Target.create "Release" (fun _ ->
+                guardRelease (ReleaseGuard.release tag definition.Specs)
+
+                match tag, definition.Specs with
+                | Some tag, Library _ ->
+                    let project =
+                        match "src" </> definition.Project.Name with
+                        | releaseSource when releaseSource |> Directory.Exists -> releaseSource
+                        | _ ->
+                            match !! "./*.fsproj" |> List.ofSeq with
+                            | [ project ] -> project
+                            | _ -> "."
+
+                    guardProjectVersion tag project
+                | Some tag, ConsoleApplication console -> guardProjectVersion tag console.ReleaseSource
+                | _ -> ()
+
                 match definition with
                 | { Specs = Library { ReleaseDir = releaseDir; NugetApi = nugetApi } } ->
                     match "src" </> definition.Project.Name with
@@ -422,6 +462,8 @@ module Targets =
             )
 
             Target.create "Publish" (fun _ ->
+                guardRelease (ReleaseGuard.publish definition.Specs)
+
                 match definition with
                 | { Specs = Library { NugetApi = NugetApi.NotUsed } } -> Trace.traceHeader "NugetApi is not used"
 
