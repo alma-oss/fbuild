@@ -42,8 +42,8 @@ module Fixture =
 // ---- Process execution ----
 
 /// Runs `exe` with `env` set on top of this process's environment, minus `GITHUB_REF_TYPE` and
-/// `GITHUB_REF_NAME`: a fixture build inherits no CI tag, so no tag check compares the engine's own
-/// tag with a fixture's change log unless `env` sets one.
+/// `GITHUB_REF_NAME`: a fixture build inherits no CI tag, so the release version guard never checks
+/// the engine's own tag against a fixture's change log unless `env` sets one.
 let execWith (env: (string * string) list) (workDir: string) (exe: string) (args: string) =
     let psi = ProcessStartInfo (exe, args)
     psi.WorkingDirectory <- workDir
@@ -323,17 +323,23 @@ let withEditedFixture fixture (edit: string -> unit) (target: string) (assertArt
     finally
         cleanup dir
 
-/// Runs a target expected to fail against a freshly prepared source-engine fixture, handing the copy
-/// to `edit` before it and the run's exit code and combined output to the assertion callback after it.
-let withFailingEditedFixture fixture (edit: string -> unit) (target: string) (assertFailure: int -> string -> unit) =
+/// Runs a target expected to fail against a freshly prepared source-engine fixture with `env` set,
+/// handing the copy to `edit` before it, and the run's exit code, combined output and directory to
+/// the assertion callback after it.
+let withFailingEditedFixtureIn env fixture (edit: string -> unit) (target: string) (assertFailure: int -> string -> string -> unit) =
     let dir = prepare fixture
 
     try
         edit dir
-        let code, out, err = exec dir "dotnet" $"run --project build/build.fsproj -- {target}"
-        assertFailure code (out + err)
+        let code, out, err = execWith env dir "dotnet" $"run --project build/build.fsproj -- {target}"
+        assertFailure code (out + err) dir
     finally
         cleanup dir
+
+/// Runs a target expected to fail against a freshly prepared source-engine fixture, handing the copy
+/// to `edit` before it and the run's exit code and combined output to the assertion callback after it.
+let withFailingEditedFixture fixture (edit: string -> unit) (target: string) (assertFailure: int -> string -> unit) =
+    withFailingEditedFixtureIn [] fixture edit target (fun code output _ -> assertFailure code output)
 
 /// Runs a target against a freshly prepared source-engine fixture and hands its directory to the
 /// assertion callback.

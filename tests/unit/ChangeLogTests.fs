@@ -3,7 +3,9 @@ module Alma.Build.Tests.ChangeLogTests
 open System
 
 open Expecto
+open Fake.IO.Globbing.Operators
 open Alma.Build.ChangeLog
+open Alma.Build.Utils
 
 let private sampleChangeLog = [
     "<!-- Keep a changelog -->"
@@ -136,6 +138,27 @@ let changeLogReleaseTests =
     ]
 
 [<Tests>]
+let projectVersionTests =
+    let check tag version = ChangeLogRelease.checkProjectVersion (TagName tag) "src/App" version
+
+    testList "ChangeLogRelease.checkProjectVersion" [
+        test "should pass a project Version equal to the tag" {
+            [ "1.2.3", "1.2.3"; "1.2.0", "1.2"; "1.2.3-beta.1", "1.2.3-beta.1" ]
+            |> List.iter (fun (tag, version) -> Expect.equal (check tag version) (Ok ()) $"Version {version} matches tag {tag}")
+        }
+
+        test "should return ProjectVersionMismatch error naming tag, Version and project when they differ" {
+            [ "1.2.3", "1.0.0"; "1.2.3", "1.2.3-beta.1"; "1.2.3", ""; "01.2.3", "1.2.3"; "1.2.3", "not-a-version" ]
+            |> List.iter (fun (tag, version) ->
+                match check tag version with
+                | Error (ChangeLogError.ProjectVersionMismatch _ as error) ->
+                    [ $"\"{tag}\""; $"\"{version}\""; "src/App"; "<Version>" ]
+                    |> List.iter (fun part -> Expect.stringContains (ChangeLogError.format error) part $"Tag {tag}, Version {version}: the message names {part}")
+                | other -> failtestf "Tag %s, Version %s: expected a mismatch, got %A" tag version other)
+        }
+    ]
+
+[<Tests>]
 let releaseNotesFileTests =
     let content tag lines = ChangeLogRelease.parse tag "CHANGELOG.md" lines |> ReleaseNotesFile.content "CHANGELOG.md"
 
@@ -184,8 +207,71 @@ let releaseNotesFileTests =
     ]
 
 [<Tests>]
-let tagNameTests =
-    testList "TagName" [
+let releaseGuardTests =
+    let tag = Some (TagName "1.2.3")
+
+    let library nugetApi =
+        Library {
+            Changelog = "CHANGELOG.md"
+            ReleaseDir = "release"
+            LibrarySources = !! "src/*.fsproj"
+            TestsSources = !! "tests/*.fsproj"
+            Organization = None
+            NugetApi = nugetApi
+            NugetCustomServerRepository = None
+        }
+
+    let console changeLog =
+        ConsoleApplication {
+            Changelog = changeLog
+            ReleaseDir = "./dist"
+            RuntimeTargets = [ Linux ]
+            RuntimeMode = RuntimeMode.Portable
+            PublishSingleFile = true
+            ReleaseSource = "src/app.fsproj"
+            ApplicationSources = !! "src/*.fsproj"
+            TestsSources = !! "tests/*.fsproj"
+        }
+
+    let executable changeLog =
+        Executable {
+            Changelog = changeLog
+            ReleaseDir = "/app"
+            ApplicationSources = !! "src/*.fsproj"
+            TestsSources = !! "tests/*.fsproj"
+        }
+
+    let changeLog = Some "CHANGELOG.md"
+    let named = ChangeLogSource.At "CHANGELOG.md"
+
+    testList "ReleaseGuard" [
+        test "should check Release of a library or console application on every run" {
+            [ library NugetApi.NotUsed; console named ]
+            |> List.iter (fun spec ->
+                Expect.equal (ReleaseGuard.release None spec) changeLog "Checked on a non-tag run"
+                Expect.equal (ReleaseGuard.release tag spec) changeLog "Checked on a tag run")
+        }
+
+        test "should check Release of an executable on a tag run only" {
+            Expect.isNone (ReleaseGuard.release None (executable named)) "Not checked on a non-tag run"
+            Expect.equal (ReleaseGuard.release tag (executable named)) changeLog "Checked on a tag run"
+        }
+
+        test "should check Publish of a library that pushes a package" {
+            [ NugetApi.Organization "alma"; NugetApi.AskForKey; NugetApi.KeyInEnvironment "NUGET_KEY" ]
+            |> List.iter (fun nugetApi -> Expect.equal (ReleaseGuard.publish (library nugetApi)) changeLog $"{nugetApi} is checked")
+        }
+
+        test "should not check Publish that pushes no package" {
+            [ library NugetApi.NotUsed; console named; executable named ]
+            |> List.iter (fun spec -> Expect.isNone (ReleaseGuard.publish spec) "Not checked")
+        }
+
+        test "should not check a spec without a change log" {
+            [ console ChangeLogSource.NoChangeLog; executable ChangeLogSource.NoChangeLog ]
+            |> List.iter (fun spec -> Expect.isNone (ReleaseGuard.release tag spec) "NoChangeLog is never checked")
+        }
+
         test "should take a tag only from a tag ref type" {
             Expect.equal (TagName.ofEnvironment (Some "tag") (Some "v1.2.3")) (Some (TagName "v1.2.3")) "The tag name is kept as given"
             Expect.equal (TagName.ofEnvironment (Some "tag") None) (Some (TagName "")) "A tag run without a name has an empty tag"

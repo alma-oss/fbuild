@@ -127,6 +127,30 @@ let integrationTests =
                 (fileExists dir "app/test.executable.dll")
                 "Release should publish the executable into app/")
 
+        editedFixtureTest
+            Executable
+            (fun dir -> File.WriteAllText (Path.Combine (dir, "CHANGELOG.md"), "## Unreleased\n\n- Pending change.\n"))
+            "Release"
+            "should release an executable whose change log holds only Unreleased outside a tag build"
+            (fun dir ->
+                Expect.isTrue (fileExists dir "app/test.executable.dll") "Release should still publish the executable into app/"
+                Expect.stringContains
+                    (File.ReadAllText (Path.Combine (dir, "AssemblyInfo.fs")))
+                    "AssemblyVersionAttribute(\"1.0\")"
+                    "AssemblyInfo should stamp the 1.0 fallback")
+
+        testCase "should fail a library release whose change log does not match the tag" <| fun () ->
+            withFailingEditedFixtureIn
+                [ "GITHUB_REF_TYPE", "tag"; "GITHUB_REF_NAME", "9.9.9" ]
+                Library
+                ignore
+                "Release no-lint"
+                (fun code output dir ->
+                    Expect.notEqual code 0 "A tag that differs from the latest release should fail Release"
+                    [ "9.9.9"; "1.0.0"; "CHANGELOG.md" ]
+                    |> List.iter (fun part -> Expect.stringContains output part "The failure should name the tag, the change-log version and the path")
+                    Expect.isFalse (anyFile dir "release" "*.nupkg") "Nothing should be packed into release/")
+
         fixtureTest Console "Release" "should archive every configured runtime when a console application is released" (fun dir ->
             consoleRuntimeIdentifiers
             |> List.iter (fun runtimeIdentifier ->

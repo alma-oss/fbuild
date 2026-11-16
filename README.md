@@ -49,6 +49,22 @@ when the tag differs from that release:
 gh release create "$TAG" --notes-file release/RELEASE_NOTES.md
 ```
 
+`Release`, and a `Publish` that pushes a package, first check the release version in
+`CHANGELOG.md`:
+
+- In a `Library` or `ConsoleApplication`, they fail when the change log holds no release
+  section — only `## Unreleased`, or no `## <version>` heading at all.
+- On a tag build (`GITHUB_REF_TYPE=tag`), they fail when the topmost release differs from the
+  tag, which is the bare version (`1.2.3`, not `v1.2.3`). This applies to every spec with a
+  change log, `Executable` included, so add a `## X.Y.Z` section below `## Unreleased` before
+  pushing the `X.Y.Z` tag. A tag must be exactly `MAJOR.MINOR.PATCH` with an optional
+  `-prerelease`.
+- On a tag build, `Release` in a `Library` or `ConsoleApplication` also fails when the
+  project's `<Version>` (as MSBuild evaluates it, `Directory.Build.props` included) differs from
+  the tag, so set `<Version>` to the tag's version before tagging.
+- An `Executable` `Release` outside a tag build is not checked, and a spec with no change log
+  (`NoChangeLog`, or `Auto` without a `CHANGELOG.md`) is never checked.
+
 Arguments:
 
 - `no-clean`: skips the `Clean` step.

@@ -180,6 +180,24 @@ module Targets =
 
         let tag = TagName.ofEnvironment (envVar "GITHUB_REF_TYPE") (envVar "GITHUB_REF_NAME")
 
+        let guardRelease changeLog =
+            match changeLog |> Option.map (ChangeLogRelease.read tag) with
+            | Some (Error error) -> error |> ChangeLogError.format |> failwith
+            | _ -> ()
+
+        let guardProjectVersion tag project =
+            let result =
+                CreateProcess.fromRawCommand "dotnet" [ "msbuild"; project; "-getProperty:Version" ]
+                |> CreateProcess.redirectOutput
+                |> Proc.run
+
+            if result.ExitCode <> 0 then
+                failwithf "Reading Version of project %s failed:\n%s%s" project result.Result.Output result.Result.Error
+
+            match ChangeLogRelease.checkProjectVersion tag project (result.Result.Output.Trim ()) with
+            | Error error -> error |> ChangeLogError.format |> failwith
+            | Ok () -> ()
+
         Target.create "Info" (fun _ ->
             let separator sign = Trace.traceFAKE "%s" (String.replicate 69 sign)
 
@@ -366,6 +384,22 @@ module Targets =
                 )
 
             Target.create "Release" (fun _ ->
+                guardRelease (ReleaseGuard.release tag definition.Specs)
+
+                match tag, definition.Specs with
+                | Some tag, Library _ ->
+                    let project =
+                        match "src" </> definition.Project.Name with
+                        | releaseSource when releaseSource |> Directory.Exists -> releaseSource
+                        | _ ->
+                            match !! "./*.fsproj" |> List.ofSeq with
+                            | [ project ] -> project
+                            | _ -> "."
+
+                    guardProjectVersion tag project
+                | Some tag, ConsoleApplication console -> guardProjectVersion tag console.ReleaseSource
+                | _ -> ()
+
                 match definition with
                 | { Specs = Library { ReleaseDir = releaseDir; NugetApi = nugetApi } } ->
                     match "src" </> definition.Project.Name with
@@ -428,6 +462,8 @@ module Targets =
             )
 
             Target.create "Publish" (fun _ ->
+                guardRelease (ReleaseGuard.publish definition.Specs)
+
                 match definition with
                 | { Specs = Library { NugetApi = NugetApi.NotUsed } } -> Trace.traceHeader "NugetApi is not used"
 

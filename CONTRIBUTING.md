@@ -114,6 +114,10 @@ To get a working `./build.sh` back immediately, `git stash` or `git revert` the 
 
 - Bump `Version` in `src/Alma.Build/Alma.Build.fsproj` and describe the change in
   `CHANGELOG.md` — the changelog drives release metadata used by assembly info generation.
+- Before pushing the `X.Y.Z` tag, add a `## X.Y.Z` section below `## Unreleased` in
+  `CHANGELOG.md` and move the release's entries into it; `## Unreleased` stays on top. The
+  tag build runs the release version guard, which fails before anything is packed when the
+  topmost release is not `X.Y.Z` or `Version` in `Alma.Build.fsproj` is not `X.Y.Z`.
 - Run `./build.sh Release` to pack `src/Alma.Build` into `release/`.
 
 ## Documentation

@@ -7,6 +7,9 @@
 - `Clean` leaves git worktrees and nested repositories inside the repository alone. It used to empty their `obj/` and `bin/` directories too, which could break a build running in one of them.
 - `Solution` now lists `build/build.fsproj`, so IDEs load the build project, and leaves it out of the `Build` target, since `build.sh` already compiles it. Rerun `Solution` and commit the regenerated solution.
 - Add `ReleaseNotes` target, which writes the notes of the latest release in `CHANGELOG.md` to `release/RELEASE_NOTES.md` for `gh release create --notes-file`. On a tag build it fails when the tag differs from that release
+- [**BC**] Fail `Release` and a `Publish` that pushes a package in a `Library` or `ConsoleApplication` whose `CHANGELOG.md` holds only `## Unreleased` and no release
+- [**BC**] Fail `Release` and a `Publish` that pushes a package on a tag build (`GITHUB_REF_TYPE=tag`) when the tag differs from the latest release in `CHANGELOG.md`, for every project with a change log. The tag is the bare version, such as `1.2.3`. On a tag build `Release` of a `Library` or `ConsoleApplication` also fails when the project's `<Version>` differs from the tag, so set `<Version>` to the tag's version before tagging. A tag must be exactly `MAJOR.MINOR.PATCH` with an optional `-prerelease`; any other tag, such as `v1.2.3`, `1.2` or `1.2.3+build.5`, fails. An `Executable` `Release` outside a tag build is unaffected
+    - Add a `## X.Y.Z` section below `## Unreleased`, holding the release's entries, before pushing the `X.Y.Z` tag
 - Fix `AssemblyInfo` falling back to version `1.0` when `CHANGELOG.md` starts with text above its first heading, such as an HTML comment
 
 ## 3.1.0 - 2026-10-14

@@ -26,6 +26,7 @@ module ChangeLog =
         | NoReleaseSection of path: string
         | UnparsableHeading of path: string * heading: string * reason: string
         | TagMismatch of path: string * tag: TagName * version: string
+        | ProjectVersionMismatch of project: string * tag: TagName * version: string
 
     [<RequireQualifiedAccess>]
     module internal ChangeLogError =
@@ -37,6 +38,8 @@ module ChangeLog =
                 sprintf "The latest release heading %A in change log %s does not parse as a release: %s" heading path reason
             | ChangeLogError.TagMismatch (path, tag, version) ->
                 sprintf "Tag %A does not match the latest release %s in change log %s." (TagName.value tag) version path
+            | ChangeLogError.ProjectVersionMismatch (project, tag, version) ->
+                sprintf "Tag %A does not match Version %A of project %s; set <Version> in the project to the tag's version." (TagName.value tag) version project
 
     [<RequireQualifiedAccess>]
     module internal ChangeLogRelease =
@@ -49,9 +52,13 @@ module ChangeLog =
         let private strictVersion =
             Text.RegularExpressions.Regex @"\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?\z"
 
+        let private semVer version =
+            try SemVer.parse version |> Some
+            with _ -> None
+
         let private tagVersion tag =
             match TagName.value tag with
-            | tag when strictVersion.IsMatch tag -> (try SemVer.parse tag |> Some with _ -> None)
+            | tag when strictVersion.IsMatch tag -> semVer tag
             | _ -> None
 
         /// The latest release in the change-log `lines` of `path`, with the raw body under its heading;
@@ -75,6 +82,12 @@ module ChangeLog =
 
         let read (tag: TagName option) (path: string) =
             readLines path |> Result.bind (parse tag path)
+
+        /// Checks the evaluated MSBuild `Version` of `project` against the tag, with the tag check's SemVer equality.
+        let checkProjectVersion (tag: TagName) (project: string) (version: string): Result<unit, ChangeLogError> =
+            match tagVersion tag, semVer version with
+            | Some tagVersion, Some version when tagVersion = version -> Ok ()
+            | _ -> Error (ChangeLogError.ProjectVersionMismatch (project, tag, version))
 
         /// The release's assembly version, or `1.0` when the change log holds no usable release;
         /// an unreadable change log stays an error.
@@ -113,3 +126,17 @@ module ChangeLog =
                 | [] -> Error (ReleaseNotesError.EmptyBody changeLogPath)
                 | lines -> Ok (String.concat "\n" lines + "\n")
             )
+
+    /// The change log to check for a spec's `release` or `publish`, given the run's tag; `None` when none is checked.
+    [<RequireQualifiedAccess>]
+    module internal ReleaseGuard =
+        let release (tag: TagName option) = function
+            | Library library -> Some library.Changelog
+            | ConsoleApplication _ as spec -> spec.ChangeLog
+            | Executable _ as spec when tag.IsSome -> spec.ChangeLog
+            | Executable _ | SAFEStackApplication _ -> None
+
+        let publish = function
+            | Library { NugetApi = NugetApi.NotUsed } -> None
+            | Library library -> Some library.Changelog
+            | Executable _ | ConsoleApplication _ | SAFEStackApplication _ -> None
