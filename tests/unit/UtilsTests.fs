@@ -2,6 +2,8 @@ module Alma.Build.Tests.UtilsTests
 
 open System.Runtime.InteropServices
 open System.Xml.Linq
+open System.IO
+open Fake.IO.Globbing.Operators
 open Expecto
 open Alma.Build.Utils
 
@@ -564,3 +566,57 @@ let teeTests =
         }
     ]
 
+
+[<Tests>]
+let changeLogResolutionTests =
+    let executable changeLog =
+        Executable {
+            Changelog = changeLog
+            ReleaseDir = "/app"
+            ApplicationSources = !! "src/*.fsproj"
+            TestsSources = !! "tests/*.fsproj"
+        }
+
+    testList "ProjectSpec.ChangeLog" [
+        test "should resolve a library's change log path" {
+            let result = Spec.defaultLibrary.ChangeLog
+
+            Expect.equal result (Some "CHANGELOG.md") "A library always names its change log"
+        }
+
+        test "should resolve the named path when the spec names one" {
+            let result = (executable (ChangeLogSource.At "docs/CHANGES.md")).ChangeLog
+
+            Expect.equal result (Some "docs/CHANGES.md") "At resolves to its path whether or not it exists"
+        }
+
+        test "should resolve no change log when the spec opts out" {
+            let result = (executable ChangeLogSource.NoChangeLog).ChangeLog
+
+            Expect.isNone result "NoChangeLog resolves to none"
+        }
+
+        test "should default non-library specs to Auto" {
+            let changeLogs =
+                [ Spec.defaultExecutable; Spec.defaultConsoleApplication [ Linux ]; Spec.defaultSAFEStackApplication "1.0" ]
+                |> List.map (function
+                    | Executable spec -> spec.Changelog
+                    | ConsoleApplication spec -> spec.Changelog
+                    | SAFEStackApplication spec -> spec.Changelog
+                    | Library _ -> failtest "A library default has no change log source")
+
+            Expect.equal changeLogs [ ChangeLogSource.Auto; ChangeLogSource.Auto; ChangeLogSource.Auto ] "Every non-library default is Auto"
+        }
+
+        test "should resolve CHANGELOG.md for Auto when it exists" {
+            let result = ChangeLogSource.Resolve ((=) "CHANGELOG.md") ChangeLogSource.Auto
+
+            Expect.equal result (Some "CHANGELOG.md") "Auto finds the root CHANGELOG.md"
+        }
+
+        test "should resolve no change log for Auto when CHANGELOG.md is missing" {
+            let result = ChangeLogSource.Resolve (fun _ -> false) ChangeLogSource.Auto
+
+            Expect.isNone result "Auto without CHANGELOG.md resolves to none"
+        }
+    ]

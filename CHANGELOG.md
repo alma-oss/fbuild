@@ -2,9 +2,12 @@
 
 <!-- There is always Unreleased section on the top. Subsections (Add, Changed, Fix, Removed) should be Add as needed. -->
 ## Unreleased
+- [**BC**] `Changelog` on `Executable`, `ConsoleApplication` and `SAFEStackApplication` specs is now `ChangeLogSource.Auto` (the default, uses `CHANGELOG.md` when present), `ChangeLogSource.At "path"` (the file is required) or `ChangeLogSource.NoChangeLog`. Replace `Some path` with `ChangeLogSource.At path` and `None` with `ChangeLogSource.NoChangeLog`.
 - `AssemblyInfo` ignores `###` subsection headers (`### Fix`, `### Add`, …) in `CHANGELOG.md` when reading the release version; previously any such line made the version fall back to `1.0`
 - `Clean` leaves git worktrees and nested repositories inside the repository alone. It used to empty their `obj/` and `bin/` directories too, which could break a build running in one of them.
 - `Solution` now lists `build/build.fsproj`, so IDEs load the build project, and leaves it out of the `Build` target, since `build.sh` already compiles it. Rerun `Solution` and commit the regenerated solution.
+- Add `ReleaseNotes` target, which writes the notes of the latest release in `CHANGELOG.md` to `release/RELEASE_NOTES.md` for `gh release create --notes-file`. On a tag build it fails when the tag differs from that release
+- Fix `AssemblyInfo` falling back to version `1.0` when `CHANGELOG.md` starts with text above its first heading, such as an HTML comment
 
 ## 3.1.0 - 2026-10-14
 - Fix `RaspberryPiHassioAddon` to use real framework target `linux-musl-arm64`

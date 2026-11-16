@@ -109,6 +109,19 @@ let integrationTests =
                 "Rerunning Solution regenerates the same content rather than corrupting or duplicating it"
             Expect.equal (Directory.GetFiles(dir, "*.slnx").Length) 1 "Rerunning Solution does not create a second file")
 
+        editedFixtureTest
+            Library
+            (fun dir ->
+                Directory.CreateDirectory (Path.Combine (dir, "release")) |> ignore
+                File.WriteAllText (Path.Combine (dir, "release", "RELEASE_NOTES.md"), "stale notes"))
+            "ReleaseNotes"
+            "should replace stale release notes with the latest release body"
+            (fun dir ->
+                Expect.equal
+                    (File.ReadAllText (Path.Combine (dir, "release", "RELEASE_NOTES.md")))
+                    "- Initial fixture release.\n"
+                    "ReleaseNotes should overwrite the file with the body of ## 1.0.0, without its heading")
+
         fixtureTest Executable "Release" "should publish the executable when an executable application is released" (fun dir ->
             Expect.isTrue
                 (fileExists dir "app/test.executable.dll")

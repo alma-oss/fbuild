@@ -40,6 +40,15 @@ and test projects plus `build/build.fsproj`, which the IDE loads but `Build` doe
 compile, overwriting it on every run — like `Bootstrap`, rerun it whenever
 the project's structure changes.
 
+`ReleaseNotes` sits outside the chain too. It writes the body of the latest release in
+`CHANGELOG.md` to `release/RELEASE_NOTES.md` for a release workflow. On a tag build it fails
+when the tag differs from that release:
+
+```bash
+./build.sh ReleaseNotes
+gh release create "$TAG" --notes-file release/RELEASE_NOTES.md
+```
+
 Arguments:
 
 - `no-clean`: skips the `Clean` step.
@@ -202,6 +211,19 @@ independent of the release matrix. `Release` always publishes every target in
 `RuntimeTargets`; `PublishSingleFile = false` keeps the published files separate.
 
 Use `Custom "linux-musl-arm64"` for a RID without a predefined `RuntimeTarget` case.
+
+### Change log
+
+A library always reads `Changelog` (default `"CHANGELOG.md"`). `Executable`,
+`ConsoleApplication`, and `SAFEStackApplication` specs take a `ChangeLogSource`:
+`Auto` (the default) uses `CHANGELOG.md` when it exists at the repo root, `At "path"`
+requires the named file, and `NoChangeLog` uses none:
+
+```fsharp
+Specs =
+    Spec.defaultExecutable
+    |> Spec.mapExecutable (fun spec -> { spec with Changelog = ChangeLogSource.At "docs/CHANGELOG.md" })
+```
 
 ## Updating
 

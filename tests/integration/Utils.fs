@@ -41,12 +41,18 @@ module Fixture =
 
 // ---- Process execution ----
 
+/// Runs `exe` with `env` set on top of this process's environment, minus `GITHUB_REF_TYPE` and
+/// `GITHUB_REF_NAME`: a fixture build inherits no CI tag, so no tag check compares the engine's own
+/// tag with a fixture's change log unless `env` sets one.
 let execWith (env: (string * string) list) (workDir: string) (exe: string) (args: string) =
     let psi = ProcessStartInfo (exe, args)
     psi.WorkingDirectory <- workDir
     psi.RedirectStandardOutput <- true
     psi.RedirectStandardError <- true
     psi.UseShellExecute <- false
+
+    psi.Environment.Remove "GITHUB_REF_TYPE" |> ignore
+    psi.Environment.Remove "GITHUB_REF_NAME" |> ignore
 
     for name, value in env do
         psi.Environment[name] <- value
