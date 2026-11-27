@@ -19,7 +19,6 @@ jobs:
     env:
       PRIVATE_FEED_USER: ${{ github.repository_owner }}
       PRIVATE_FEED_PASS: ${{ secrets.GITHUB_TOKEN }}
-      DOTNET_ROLL_FORWARD: latestMajor
 
     steps:
       - uses: actions/checkout@v6
